@@ -6,7 +6,7 @@ exercises the full acceptance path against the live Reminders store:
 
   initialize -> tools/list -> create_list -> create_reminder (with due date,
   priority, alarm, notes) -> list_reminders -> get_reminder ->
-  update_reminder (complete via completed_at? no — update fields) ->
+  update_reminder (notes, priority, alarms, clears) ->
   complete_reminder -> list_reminders(completed_only) -> uncomplete_reminder ->
   delete_reminder -> delete_list -> ping -> bogus method
 
@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -64,6 +65,15 @@ class Server:
         )
         self.next_id = 0
         self.stderr_lines = []
+        # Drain stderr on a background thread so mid-run error messages carry
+        # the server's actual stderr (reading it inline would block on a pipe
+        # that fills up while the process is wedged).
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _drain_stderr(self):
+        for line in self.proc.stderr:
+            self.stderr_lines.append(line.rstrip("\n"))
 
     def _send(self, obj):
         self.proc.stdin.write(json.dumps(obj) + "\n")
@@ -122,7 +132,8 @@ class Server:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-        self.stderr_lines = (self.proc.stderr.read() or "").splitlines()
+        self.proc.stderr.close()   # EOF for the drain thread
+        self._stderr_thread.join(timeout=2)
 
 
 def main():
@@ -176,6 +187,12 @@ def main():
         names = [x["name"] for x in ll["lists"]]
         check("list_lists finds the test list", TEST_LIST in names, str(names[:10]))
 
+        # AppleScript `make new list` does not dedupe by name — the server must
+        # not create a duplicate when the list already exists.
+        _, lst2 = s.tool("create_list", {"name": TEST_LIST})
+        check("create_list on an existing name is a no-op (no duplicate)",
+              lst2.get("created") is False and lst2.get("id") == lst.get("id"), str(lst2))
+
         # -- reminder lifecycle ----------------------------------------------
         print("reminder lifecycle")
         _, rem = s.tool("create_reminder", {
@@ -218,6 +235,21 @@ def main():
         for probe in (dst, dstt):
             s.tool("delete_reminder", {"identifier": probe.get("identifier")})
 
+        # Fractional seconds must parse (agents paste ISO strings from other tools).
+        _, frac = s.tool("create_reminder", {"title": "frac probe", "list_name": TEST_LIST, "due": "2099-07-02T09:30:00.5"})
+        check("fractional-second due parses to the wall clock",
+              str(frac.get("due_date", "")).startswith("2099-07-02T09:30"), str(frac.get("due_date")))
+        s.tool("delete_reminder", {"identifier": frac.get("identifier")})
+
+        # A2 regression: a bare-date due_until spans the whole day, so a timed
+        # reminder due 23:59 on the boundary day is still included.
+        _, bd = s.tool("create_reminder", {"title": "boundary probe", "list_name": TEST_LIST, "due": "2099-12-31T23:59"})
+        _, bdq = s.tool("list_reminders", {"list": TEST_LIST, "due_from": "2099-12-31", "due_until": "2099-12-31"})
+        check("bare-date due_until spans the whole boundary day",
+              any(x["identifier"] == bd.get("identifier") for x in bdq.get("reminders", [])),
+              f"count={bdq.get('count')}")
+        s.tool("delete_reminder", {"identifier": bd.get("identifier")})
+
         # filters: query + has_due_date + notes_query
         _, q = s.tool("list_reminders", {"list": TEST_LIST, "query": "smoke"})
         check("list_reminders query=smoke", q.get("count") == 1, str(q.get("count")))
@@ -229,6 +261,15 @@ def main():
         check("list_reminders notes_query", nq.get("count") == 1, str(nq.get("count")))
         _, dr = s.tool("list_reminders", {"list": TEST_LIST, "due_from": "2099-01-01", "due_until": "2099-12-31"})
         check("list_reminders due range", dr.get("count") == 1, str(dr.get("count")))
+
+        # A4 regression: an unparseable boundary must be an error, not a
+        # silently-dropped filter (which would make a wrong query look right).
+        res, data = s.tool("list_reminders", {"list": TEST_LIST, "due_from": "tomorrow"})
+        check("unparseable due_from is an error, not a silent no-op",
+              res.get("isError") is True, str(data))
+        res, data = s.tool("list_reminders", {"list": TEST_LIST, "due_until": "2024/06/01"})
+        check("unparseable due_until is an error, not a silent no-op",
+              res.get("isError") is True, str(data))
 
         # -- update ------------------------------------------------------------
         print("update")
@@ -287,6 +328,27 @@ def main():
         except Exception:
             gone = False
         check("deleted list not found", gone)
+
+        # -- validation: bad inputs must be tool errors, not crashes ----------
+        print("validation")
+        # B4: out-of-range recurrence fields used to reach EKRecurrenceRule and
+        # raise an uncatchable ObjC exception — a dead server process. They
+        # must now come back as isError.
+        res, data = s.tool("create_reminder", {"title": "rec probe", "list_name": TEST_LIST,
+                                               "recurrence": {"frequency": 8}})
+        check("recurrence frequency 8 (days) rejected",
+              res.get("isError") is True, str(data))
+        res, data = s.tool("create_reminder", {"title": "rec probe", "list_name": TEST_LIST,
+                                               "recurrence": {"frequency": "weekly", "days_of_week": [0]}})
+        check("recurrence days_of_week [0] rejected",
+              res.get("isError") is True, str(data))
+        res, data = s.tool("create_reminder", {"title": "rec probe", "list_name": TEST_LIST,
+                                               "recurrence": {"frequency": "monthly", "days_of_month": [32]}})
+        check("recurrence days_of_month [32] rejected",
+              res.get("isError") is True, str(data))
+        # the server must still be alive
+        msg = s.call("ping")
+        check("server alive after bad recurrence input", msg.get("result") == {}, str(msg))
 
         # -- protocol edge cases -----------------------------------------------
         print("protocol edges")

@@ -66,18 +66,25 @@ in [`docs/tool-spec.md`](docs/tool-spec.md).
 python3 scripts/smoke_test.py
 ```
 
-Spawns the release binary and runs 70 checks against the live Reminders store —
+Spawns the release binary and runs 79 checks against the live Reminders store —
 the whole handshake and all twelve tools, create through delete, in a scratch
-list it cleans up afterwards. Exit code 0 means every check passed.
+list it cleans up afterwards, plus the regression probes (summer all-day
+dates, whole-day `due_until`, unparseable-boundary errors, out-of-range
+recurrence input). Exit code 0 means every check passed. Needs a live
+Reminders store (it creates and deletes real rows, so it cannot run in CI) —
+`swift test` covers the store-independent parsing/serialization logic.
 
 ## Notes on EventKit
 
 [`docs/eventkit-surface.md`](docs/eventkit-surface.md) records what this SDK
 actually exposes, verified by compile probe and by runtime crash. Two findings
 worth knowing before you write against it: `predicateForIncompleteReminders`
-with nil bounds takes the process down, and KVC-composed predicates crash the
+with nil bounds takes the process down, KVC-composed predicates crash the
 fetch — only store-factory predicates survive, so all query narrowing here
-happens in Swift. There is no calendar-creation API and no sub-reminders.
+happens in Swift — and `EKWeekday`/`EKRecurrenceFrequency`'s failable inits
+are not actually failable, so recurrence input is range-checked before it
+reaches `EKRecurrenceRule`. There is no calendar-creation API and no
+sub-reminders.
 
 ## License
 

@@ -1,0 +1,23 @@
+# CI for reminders-mcp.
+#
+# swift test exercises the RemindersCore library (date parsing/serialization,
+# priority, colour, recurrence/alarm construction) — no EventKit store access,
+# so it needs no TCC grant and no Reminders.app. The live-store behaviour is
+# covered by scripts/smoke_test.py, which deliberately does NOT run here: it
+# creates and deletes real reminder rows.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: swift test
+      - name: Release build
+        run: swift build -c release

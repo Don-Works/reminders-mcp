@@ -72,7 +72,7 @@ initializer; `frequency`, `interval`, `recurrenceEnd`, `daysOfTheWeek`, `daysOfT
 
 `EKWeekday`: 1 = Sunday … 7 = Saturday.
 `EKRecurrenceFrequency` raw values: daily 1, weekly 2, monthly 3, yearly 4, workdays 5,
-months 6, weeks 7, days 8.
+months 6, weeks 7, days 8 — **but see the recurrence gotchas below: 8 is a trap**.
 
 ## Implementation constraints found during the probe
 
@@ -100,3 +100,17 @@ months 6, weeks 7, days 8.
   range, due-date range, has-due, exact/case-diacritic-insensitive title match, notes/location
   contains).
 - MCP stdio framing is newline-delimited JSON, no `Content-Length` header.
+- **Recurrence gotchas (probed 2026-09-08, all verified by execution):**
+  - `EKWeekday(rawValue:)` and `EKRecurrenceFrequency(rawValue:)` are **not actually
+    failable** on this SDK: `EKWeekday(rawValue: 0)` and `(rawValue: 8)` and
+    `EKRecurrenceFrequency(rawValue: 9)` all return a *non-nil* zeroed/invalid case.
+    Never trust these inits to reject out-of-range values — range-check the `Int`
+    first. An invalid value that reaches `EKRecurrenceRule`'s init raises an
+    uncatchable ObjC exception (the server process dies).
+  - `frequency` 8 ("days") looks constructible but `EKRecurrenceRule` silently stores
+    it as raw 0 — an invalid, unserializable rule. The server therefore rejects 8
+    (1–7 only), while still *labelling* raw 8 as "days" on the way out in case another
+    client created such a rule.
+  - `Date` is a `Double`: at the magnitude of year 2099 its resolution is ~119 ns, so
+    an end-of-day boundary built with `nanosecond = 999_000_000` reads back as e.g.
+    `999000072`. Harmless for range comparison; just don't assert equality on it.
