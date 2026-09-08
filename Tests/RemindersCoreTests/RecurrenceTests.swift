@@ -66,4 +66,16 @@ final class RecurrenceTests: XCTestCase {
         XCTAssertThrowsError(try alarmFrom([:]))
         XCTAssertThrowsError(try alarmFrom(["date": "someday"]))
     }
+
+    // Swift traps on overflow and a trap cannot be caught, so these took the whole server
+    // down rather than failing one call: minutes * 60 overflowed, and abs(Int.min) has no
+    // representable result.
+    func testExtremeIntegersAreRejectedRatherThanTrapping() {
+        XCTAssertThrowsError(try alarmFrom(["minutes": Int.max]))
+        XCTAssertThrowsError(try alarmFrom(["minutes": Int.min]))
+        XCTAssertThrowsError(try recurrenceFrom(["frequency": "weekly", "set_positions": [Int.min]]))
+        XCTAssertThrowsError(try recurrenceFrom(["frequency": "weekly", "set_positions": [Int.max]]))
+        XCTAssertNoThrow(try alarmFrom(["minutes": -15]))
+        XCTAssertNoThrow(try recurrenceFrom(["frequency": "weekly", "set_positions": [-1]]))
+    }
 }

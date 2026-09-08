@@ -23,6 +23,7 @@ Exit code 0 = all checks passed.
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -65,11 +66,19 @@ class Server:
         )
         self.next_id = 0
         self.stderr_lines = []
+        self.stdout_q: "queue.Queue[str]" = queue.Queue()
+        self._stdout_thread = threading.Thread(target=self._drain_stdout, daemon=True)
+        self._stdout_thread.start()
         # Drain stderr on a background thread so mid-run error messages carry
         # the server's actual stderr (reading it inline would block on a pipe
         # that fills up while the process is wedged).
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
+
+    def _drain_stdout(self):
+        for line in self.proc.stdout:
+            self.stdout_q.put(line)
+        self.stdout_q.put("")
 
     def _drain_stderr(self):
         for line in self.proc.stderr:
@@ -87,7 +96,13 @@ class Server:
         self._send(req)
         deadline = time.time() + timeout
         while time.time() < deadline:
-            line = self.proc.stdout.readline()
+            # From the reader thread, not proc.stdout directly: readline() blocks with no
+            # regard for the deadline, so a server that never answers hung the harness
+            # forever instead of failing the call — the exact failure a timeout is for.
+            try:
+                line = self.stdout_q.get(timeout=max(0.05, deadline - time.time()))
+            except queue.Empty:
+                break
             if not line:
                 break
             line = line.strip()
@@ -121,8 +136,10 @@ class Server:
             data = json.loads(text)
         except json.JSONDecodeError:
             data = text
-        if expect_error:
-            return result, data
+        if result.get("isError") and not expect_error:
+            raise RuntimeError(f"{name} returned isError: {str(data)[:300]}")
+        if expect_error and not result.get("isError"):
+            raise RuntimeError(f"{name} was expected to fail and did not: {str(data)[:300]}")
         return result, data
 
     def close(self):
@@ -264,10 +281,10 @@ def main():
 
         # A4 regression: an unparseable boundary must be an error, not a
         # silently-dropped filter (which would make a wrong query look right).
-        res, data = s.tool("list_reminders", {"list": TEST_LIST, "due_from": "tomorrow"})
+        res, data = s.tool("list_reminders", {"list": TEST_LIST, "due_from": "tomorrow"}, expect_error=True)
         check("unparseable due_from is an error, not a silent no-op",
               res.get("isError") is True, str(data))
-        res, data = s.tool("list_reminders", {"list": TEST_LIST, "due_until": "2024/06/01"})
+        res, data = s.tool("list_reminders", {"list": TEST_LIST, "due_until": "2024/06/01"}, expect_error=True)
         check("unparseable due_until is an error, not a silent no-op",
               res.get("isError") is True, str(data))
 
@@ -309,46 +326,44 @@ def main():
         _, un = s.tool("uncomplete_reminder", {"identifier": rid})
         check("uncomplete_reminder", un.get("is_completed") is False, str(un.get("is_completed")))
 
-        # -- delete reminder, then list -----------------------------------------
-        print("delete")
-        _, delr = s.tool("delete_reminder", {"identifier": rid})
-        check("delete_reminder ack", delr.get("deleted") is True, str(delr))
-        try:
-            s.tool("get_reminder", {"identifier": rid}, expect_error=True)
-            gone = True
-        except Exception:
-            gone = False
-        check("deleted reminder not found", gone)
-
-        _, dl = s.tool("delete_list", {"list": TEST_LIST})
-        check("delete_list ack", dl.get("deleted") is True, str(dl))
-        try:
-            s.tool("list_reminders", {"list": TEST_LIST}, expect_error=True)
-            gone = True
-        except Exception:
-            gone = False
-        check("deleted list not found", gone)
-
         # -- validation: bad inputs must be tool errors, not crashes ----------
+        # Runs BEFORE the test list is deleted. It used to run after, so every check here
+        # was satisfied by "list not found" rather than by the validation it names.
         print("validation")
         # B4: out-of-range recurrence fields used to reach EKRecurrenceRule and
         # raise an uncatchable ObjC exception — a dead server process. They
         # must now come back as isError.
-        res, data = s.tool("create_reminder", {"title": "rec probe", "list_name": TEST_LIST,
-                                               "recurrence": {"frequency": 8}})
-        check("recurrence frequency 8 (days) rejected",
-              res.get("isError") is True, str(data))
-        res, data = s.tool("create_reminder", {"title": "rec probe", "list_name": TEST_LIST,
-                                               "recurrence": {"frequency": "weekly", "days_of_week": [0]}})
-        check("recurrence days_of_week [0] rejected",
-              res.get("isError") is True, str(data))
-        res, data = s.tool("create_reminder", {"title": "rec probe", "list_name": TEST_LIST,
-                                               "recurrence": {"frequency": "monthly", "days_of_month": [32]}})
-        check("recurrence days_of_month [32] rejected",
-              res.get("isError") is True, str(data))
+        for label, rec in [("recurrence frequency 8 (days) rejected", {"frequency": 8}),
+                           ("recurrence days_of_week [0] rejected", {"frequency": "weekly", "days_of_week": [0]}),
+                           ("recurrence days_of_month [32] rejected", {"frequency": "monthly", "days_of_month": [32]})]:
+            res, data = s.tool("create_reminder", {"title": "rec probe", "list_name": TEST_LIST,
+                                                   "recurrence": rec}, expect_error=True)
+            check(label, res.get("isError") is True, str(data))
+            check(f"{label}: rejected by validation, not by a missing list",
+                  "list" not in str(data).lower() or "recurrence" in str(data).lower(), str(data)[:120])
+        # Swift traps on overflow and a trap cannot be caught: these killed the process.
+        for label, args in [("alarm minutes Int.max rejected", {"alarms": [{"minutes": 2**63 - 1}]}),
+                            ("alarm minutes Int.min rejected", {"alarms": [{"minutes": -2**63}]}),
+                            ("set_positions Int.min rejected",
+                             {"recurrence": {"frequency": "weekly", "set_positions": [-2**63]}})]:
+            res, data = s.tool("create_reminder", dict({"title": "overflow probe", "list_name": TEST_LIST}, **args),
+                               expect_error=True)
+            check(label, res.get("isError") is True, str(data))
         # the server must still be alive
         msg = s.call("ping")
         check("server alive after bad recurrence input", msg.get("result") == {}, str(msg))
+
+        # -- delete reminder, then list -----------------------------------------
+        print("delete")
+        _, delr = s.tool("delete_reminder", {"identifier": rid})
+        check("delete_reminder ack", delr.get("deleted") is True, str(delr))
+        res, data = s.tool("get_reminder", {"identifier": rid}, expect_error=True)
+        check("deleted reminder not found", res.get("isError") is True, str(data)[:120])
+
+        _, dl = s.tool("delete_list", {"list": TEST_LIST})
+        check("delete_list ack", dl.get("deleted") is True, str(dl))
+        res, data = s.tool("list_reminders", {"list": TEST_LIST}, expect_error=True)
+        check("deleted list not found", res.get("isError") is True, str(data)[:120])
 
         # -- protocol edge cases -----------------------------------------------
         print("protocol edges")

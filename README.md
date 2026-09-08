@@ -66,7 +66,7 @@ in [`docs/tool-spec.md`](docs/tool-spec.md).
 python3 scripts/smoke_test.py
 ```
 
-Spawns the release binary and runs 79 checks against the live Reminders store —
+Spawns the release binary and runs 85 checks against the live Reminders store —
 the whole handshake and all twelve tools, create through delete, in a scratch
 list it cleans up afterwards, plus the regression probes (summer all-day
 dates, whole-day `due_until`, unparseable-boundary errors, out-of-range

@@ -61,8 +61,17 @@ func recurrenceJSON(_ r: EKRecurrenceRule) -> [String: Any] {
 
 // MARK: - Construction
 
+/// A hundred years either side of the reminder. Wide enough for any real alarm, and it keeps
+/// `m * 60` away from the overflow that traps — a Swift arithmetic trap is not catchable, so an
+/// oversized `minutes` took the whole process down rather than failing the one call.
+let alarmMinutesLimit = 100 * 365 * 24 * 60
+
 public func alarmFrom(_ a: [String: Any]) throws -> EKAlarm {
     if let m = a["minutes"] as? Int {
+        // .magnitude, not abs(): abs(Int.min) traps on its own.
+        guard m.magnitude <= UInt(alarmMinutesLimit) else {
+            throw MCPErr("alarm.minutes must be within ±\(alarmMinutesLimit) (about a century)")
+        }
         return EKAlarm(relativeOffset: TimeInterval(m * 60))
     }
     if let d = argString(a["date"]) {
@@ -130,7 +139,7 @@ public func recurrenceFrom(_ a: [String: Any]) throws -> EKRecurrenceRule {
     let doy = try validInts("days_of_year", a["days_of_year"] as? [Int], 1...366)
     let sp: [NSNumber]
     if let arr = a["set_positions"] as? [Int] {
-        for v in arr where !(1...6).contains(abs(v)) {
+        for v in arr where !(1...6).contains(Int(exactly: v.magnitude) ?? .max) {
             throw MCPErr("recurrence.set_positions values must be ±1 to ±6")
         }
         sp = arr.map { NSNumber(value: $0) }
