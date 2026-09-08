@@ -206,6 +206,18 @@ def main():
         check("list_reminders finds the reminder", rid in ids, str(ids))
         check("list_reminders count field", lrem.get("count") == 1, str(lrem.get("count")))
 
+        # A summer all-day date and a summer wall-clock time. TEST_DUE is in January, when
+        # this machine's zone is UTC, so it passes whether or not floating components are
+        # serialized correctly; under BST an all-day 1 July used to read back as 30 June.
+        _, dst = s.tool("create_reminder", {"title": "dst probe", "list_name": TEST_LIST, "due": "2099-07-01"})
+        check("summer all-day due round-trips to the date it was set",
+              str(dst.get("due_date")) == "2099-07-01", str(dst.get("due_date")))
+        _, dstt = s.tool("create_reminder", {"title": "dst probe timed", "list_name": TEST_LIST, "due": "2099-07-01T14:00"})
+        check("summer timed due keeps the wall-clock time it was set",
+              str(dstt.get("due_date")).startswith("2099-07-01T14:00:00"), str(dstt.get("due_date")))
+        for probe in (dst, dstt):
+            s.tool("delete_reminder", {"identifier": probe.get("identifier")})
+
         # filters: query + has_due_date + notes_query
         _, q = s.tool("list_reminders", {"list": TEST_LIST, "query": "smoke"})
         check("list_reminders query=smoke", q.get("count") == 1, str(q.get("count")))

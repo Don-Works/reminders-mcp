@@ -55,7 +55,10 @@ into a daemon-hosted gateway.
 | `delete_reminder` | Delete by identifier or title |
 
 Dates are ISO-8601, or `YYYY-MM-DD` for an all-day reminder in a floating time
-zone. Full argument tables are in [`docs/tool-spec.md`](docs/tool-spec.md).
+zone, and they round-trip: an all-day reminder reads back as the bare date it was
+set to, a timed one as ISO-8601 with this machine's offset. Absolute instants —
+completion, creation, alarms, recurrence ends — are UTC. Full argument tables are
+in [`docs/tool-spec.md`](docs/tool-spec.md).
 
 ## Smoke test
 
@@ -63,7 +66,7 @@ zone. Full argument tables are in [`docs/tool-spec.md`](docs/tool-spec.md).
 python3 scripts/smoke_test.py
 ```
 
-Spawns the release binary and runs 68 checks against the live Reminders store —
+Spawns the release binary and runs 70 checks against the live Reminders store —
 the whole handshake and all twelve tools, create through delete, in a scratch
 list it cleans up afterwards. Exit code 0 means every check passed.
 

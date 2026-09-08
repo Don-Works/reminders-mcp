@@ -20,7 +20,7 @@ several differ from the ObjC header. The Swift names are what you must use.
 | ObjC-ish name | Swift (this SDK) |
 |---|---|
 | `calendarsForEntityType:` | `calendars(for: .reminder)` |
-| `defaultCalendarForNewReminders` (property) | `defaultCalendarForNewReminders()` (method, non-optional) |
+| `defaultCalendarForNewReminders` (property) | `defaultCalendarForNewReminders()` (method, optional) |
 | `fetchRemindersMatchingPredicate:completion:` | `fetchReminders(matching:completion:)` (single completion arg) |
 | `predicateForRemindersInCalendars:` | `predicateForReminders(in:)` |
 | `predicateForIncompleteRemindersWithDueDateStarting:ending:calendars:` | `predicateForIncompleteReminders(withDueDateStarting:ending:calendars:)` |

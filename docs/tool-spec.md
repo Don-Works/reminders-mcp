@@ -20,13 +20,22 @@
 `recurrence`: `{frequency, interval (default 1), days_of_week[], days_of_month[],
 months_of_year[], weeks_of_year[], days_of_year[], set_positions[], until | count}`.
 
-Dates: ISO-8601, or `YYYY-MM-DD` for an all-day reminder. Time zone left unset (floating).
+Dates in: ISO-8601, or `YYYY-MM-DD` for an all-day reminder. Time zone left unset (floating).
+
+Dates out, on `due_date` and `start_date`: an all-day reminder serializes as the bare
+`YYYY-MM-DD` it was set to, a timed one as ISO-8601 with this machine's offset
+(`2026-07-01T14:00:00+01:00`). Both round-trip: what goes in comes back. Absolute
+instants — `completed_date`, `creation_date`, `last_modified_date`, alarm and
+recurrence-end dates — are UTC, because those are real instants rather than
+wall-clock components.
 
 MCP: `initialize` (echo the client's protocolVersion, default `2024-11-05`; serverInfo
 `reminders-mcp` 0.1.0), `ping`, `tools/list`, `tools/call` returning
 `{content:[{type:"text",text}], isError}`, `-32601` for unknown methods with an id,
 no response for notifications.
 
-Still to write: `Sources/reminders-mcp/main.swift` (~650 lines), `scripts/smoke_test.py`
-(spawn the binary, JSON-RPC round-trip create → list → get → complete → delete), README,
-`.gitignore`.
+`list_reminders` returns `{count, total, truncated, reminders[]}` — `total` is the match
+count before `limit` is applied.
+
+All of the above is implemented in `Sources/reminders-mcp/main.swift` and exercised by
+`scripts/smoke_test.py` (70 checks against the live store).

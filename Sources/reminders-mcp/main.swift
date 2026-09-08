@@ -54,6 +54,15 @@ func argBool(_ value: Any?, default def: Bool) -> Bool {
 let gregorian = Calendar(identifier: .gregorian)
 let isoFormatter = ISO8601DateFormatter()
 
+/// Floating components rendered with this machine's current offset, so a reminder set for
+/// 14:00 reads back as 14:00 and not as its UTC equivalent.
+let localISOFormatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    f.timeZone = TimeZone.current
+    return f
+}()
+
 func iso8601(_ date: Date) -> String {
     isoFormatter.string(from: date)
 }
@@ -71,7 +80,9 @@ func parseDue(_ s: String) -> ParsedDue? {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
         f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
+        // Current zone, not UTC: a bare date is compared against reminder due dates, which
+        // EventKit materialises as local wall-clock. Parsing the boundary in UTC put the two
+        // an offset apart and moved which reminders a due_from/due_until range caught.
         if let d = f.date(from: t) { return ParsedDue(date: d, dateOnly: true) }
     }
     if let d = isoFormatter.date(from: t) { return ParsedDue(date: d, dateOnly: false) }
@@ -87,20 +98,39 @@ func parseDue(_ s: String) -> ParsedDue? {
 /// Build dueDateComponents / startDateComponents from a user date string.
 /// Year/month/day only ⇒ all-day. Time zone left unset (floating).
 func dueComponents(_ s: String) throws -> DateComponents {
-    guard let p = parseDue(s) else {
+    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let ymd = bareDateComponents(t) { return ymd }
+    guard let p = parseDue(t) else {
         throw MCPErr("Unparseable date \"\(s)\" — use ISO-8601 or YYYY-MM-DD")
     }
-    var fields: Set<Calendar.Component> = [.year, .month, .day]
-    if !p.dateOnly { fields.formUnion([.hour, .minute, .second]) }
-    var c = gregorian.dateComponents(fields, from: p.date)
+    var c = gregorian.dateComponents([.year, .month, .day, .hour, .minute, .second], from: p.date)
     c.timeZone = nil
     return c
 }
 
+/// Year/month/day taken straight from the string. A bare date carries no time zone, so
+/// routing it through a Date — parsed in one zone, decomposed in another — is what made
+/// "2026-07-01" arrive as 30 June wherever the two zones disagree.
+func bareDateComponents(_ s: String) -> DateComponents? {
+    guard s.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil else { return nil }
+    let parts = s.split(separator: "-")
+    guard let y = Int(parts[0]), let m = Int(parts[1]), let d = Int(parts[2]),
+          (1...12).contains(m), (1...31).contains(d) else { return nil }
+    var c = DateComponents()
+    c.year = y
+    c.month = m
+    c.day = d
+    return c
+}
+
+/// All-day reminders serialize as the bare date they were set to. Rendering floating
+/// components as an absolute instant is what turned an all-day 1 July into
+/// "2026-06-30T23:00:00Z" under BST — the previous day, every summer date, silently.
 func isoFromComponents(_ c: DateComponents?) -> String? {
-    guard let c, c.year != nil else { return nil }
-    guard let d = gregorian.date(from: c) else { return nil }
-    return iso8601(d)
+    guard let c, let y = c.year, let m = c.month, let d = c.day else { return nil }
+    if isAllDay(c) { return String(format: "%04d-%02d-%02d", y, m, d) }
+    guard let date = gregorian.date(from: c) else { return nil }
+    return localISOFormatter.string(from: date)
 }
 
 func isAllDay(_ c: DateComponents?) -> Bool {
