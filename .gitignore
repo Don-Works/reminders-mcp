@@ -1,4 +1,4 @@
-[context-budget] id=ca-0048f21b  269 chars archived. Head: # Swift Package Manager
+# Swift Package Manager
 .build/
 .swiftpm/
 *.xcodeproj
@@ -6,6 +6,10 @@ DerivedData/
 
 # macOS
 .DS_Store
-… Recall: context_budget_recall id=ca-0048f21b
+
+# Python
+__pycache__/
+*.py[cod]
+
 # Internal working material — provenance, salvage, machine-specific deployment notes
 internal/

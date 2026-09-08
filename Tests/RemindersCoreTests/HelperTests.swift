@@ -22,6 +22,28 @@ final class HelperTests: XCTestCase {
         XCTAssertFalse(argBool(nil, default: false))
     }
 
+    func testStrictJSONArgumentTypes() throws {
+        XCTAssertEqual(jsonBoolean(true), true)
+        XCTAssertNil(jsonBoolean(1), "a JSON integer must not bridge to Bool")
+        XCTAssertEqual(jsonInteger(1), 1)
+        XCTAssertNil(jsonInteger(true), "a JSON boolean must not bridge to Int")
+        XCTAssertTrue(isJSONNumber(1.5))
+        XCTAssertFalse(isJSONNumber(true))
+
+        XCTAssertEqual(try optionalStringArg("  value  ", name: "field"), "value")
+        XCTAssertEqual(try optionalStringArg("", name: "notes", allowEmpty: true), "")
+        XCTAssertNil(try optionalStringArg(nil, name: "field"))
+        XCTAssertThrowsError(try optionalStringArg(NSNull(), name: "field"))
+        XCTAssertThrowsError(try optionalStringArg(42, name: "field"))
+        XCTAssertThrowsError(try boolArg(1, name: "flag", default: false))
+        XCTAssertThrowsError(try optionalIntegerArg(true, name: "count"))
+        XCTAssertEqual(try optionalIntegerArrayArg([1, 2, 3], name: "values"), [1, 2, 3])
+        XCTAssertThrowsError(try optionalIntegerArrayArg([1, true], name: "values"))
+        XCTAssertThrowsError(try optionalObjectArrayArg([["ok": true], 2], name: "objects"))
+        XCTAssertNoThrow(try rejectUnknownKeys(["known": 1], allowed: ["known"], name: "object"))
+        XCTAssertThrowsError(try rejectUnknownKeys(["typo": 1], allowed: ["known"], name: "object"))
+    }
+
     func testCaseDiacriticInsensitive() {
         XCTAssertTrue(cdEqual("Café", "cafe"))
         XCTAssertTrue(cdEqual("CAFÉ", "café"))
@@ -42,6 +64,7 @@ final class HelperTests: XCTestCase {
         XCTAssertEqual(try parsePriority(1), 1)
         XCTAssertEqual(try parsePriority("5"), 5)
         XCTAssertThrowsError(try parsePriority(7))
+        XCTAssertThrowsError(try parsePriority(true))
         XCTAssertThrowsError(try parsePriority("urgent"))
         XCTAssertThrowsError(try parsePriority(nil))
     }

@@ -37,6 +37,7 @@ DEFAULT_BIN = os.path.join(
 
 SUFFIX = uuid.uuid4().hex[:8]
 TEST_LIST = f"mcp-smoke {SUFFIX}"
+TARGET_LIST = f"mcp-smoke-target {SUFFIX}"
 TEST_TITLE = f"mcp smoke reminder {SUFFIX}"
 TEST_NOTES = "created by scripts/smoke_test.py"
 TEST_DUE = "2099-01-01"          # all-day, far future
@@ -66,7 +67,7 @@ class Server:
         )
         self.next_id = 0
         self.stderr_lines = []
-        self.stdout_q: "queue.Queue[str]" = queue.Queue()
+        self.stdout_q = queue.Queue()
         self._stdout_thread = threading.Thread(target=self._drain_stdout, daemon=True)
         self._stdout_thread.start()
         # Drain stderr on a background thread so mid-run error messages carry
@@ -78,7 +79,7 @@ class Server:
     def _drain_stdout(self):
         for line in self.proc.stdout:
             self.stdout_q.put(line)
-        self.stdout_q.put("")
+        self.stdout_q.put(None)
 
     def _drain_stderr(self):
         for line in self.proc.stderr:
@@ -88,12 +89,7 @@ class Server:
         self.proc.stdin.write(json.dumps(obj) + "\n")
         self.proc.stdin.flush()
 
-    def call(self, method, params=None, timeout=30):
-        self.next_id += 1
-        req = {"jsonrpc": "2.0", "id": self.next_id, "method": method}
-        if params is not None:
-            req["params"] = params
-        self._send(req)
+    def _read_response(self, expected_id, label, timeout):
         deadline = time.time() + timeout
         while time.time() < deadline:
             # From the reader thread, not proc.stdout directly: readline() blocks with no
@@ -103,7 +99,7 @@ class Server:
                 line = self.stdout_q.get(timeout=max(0.05, deadline - time.time()))
             except queue.Empty:
                 break
-            if not line:
+            if line is None:
                 break
             line = line.strip()
             if not line:
@@ -112,9 +108,28 @@ class Server:
                 msg = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if msg.get("id") == self.next_id:
+            if msg.get("id") == expected_id:
                 return msg
-        raise RuntimeError(f"no response to {method} (stderr: {self.stderr()})")
+        raise RuntimeError(f"no response to {label} (stderr: {self.stderr()})")
+
+    def request(self, obj, expected_id, label="request", timeout=30):
+        self._send(obj)
+        return self._read_response(expected_id, label, timeout)
+
+    def send_raw(self, line):
+        self.proc.stdin.write(line + "\n")
+        self.proc.stdin.flush()
+
+    def read_response(self, expected_id, label="request", timeout=30):
+        return self._read_response(expected_id, label, timeout)
+
+    def call(self, method, params=None, timeout=30):
+        self.next_id += 1
+        request_id = self.next_id
+        req = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            req["params"] = params
+        return self.request(req, request_id, method, timeout)
 
     def notify(self, method, params=None):
         obj = {"jsonrpc": "2.0", "method": method}
@@ -123,11 +138,11 @@ class Server:
         self._send(obj)
 
     def stderr(self):
-        return "".join(self.stderr_lines)
+        return "\n".join(self.stderr_lines)
 
-    def tool(self, name, args=None, expect_error=False):
-        """Call a tool, unwrap {content:[{text}], isError}."""
-        msg = self.call("tools/call", {"name": name, "arguments": args or {}})
+    def tool_unchecked(self, name, args=None, timeout=30):
+        """Call a tool and unwrap its content without imposing success/error."""
+        msg = self.call("tools/call", {"name": name, "arguments": args or {}}, timeout=timeout)
         if "error" in msg:
             raise RuntimeError(f"protocol error on tools/call {name}: {msg['error']}")
         result = msg["result"]
@@ -136,6 +151,11 @@ class Server:
             data = json.loads(text)
         except json.JSONDecodeError:
             data = text
+        return result, data
+
+    def tool(self, name, args=None, expect_error=False):
+        """Call a tool, unwrap {content:[{text}], isError}."""
+        result, data = self.tool_unchecked(name, args)
         if result.get("isError") and not expect_error:
             raise RuntimeError(f"{name} returned isError: {str(data)[:300]}")
         if expect_error and not result.get("isError"):
@@ -143,14 +163,44 @@ class Server:
         return result, data
 
     def close(self):
+        try:
+            self.proc.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
         if self.proc.poll() is None:
-            self.proc.terminate()
             try:
-                self.proc.wait(timeout=5)
+                self.proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
-        self.proc.stderr.close()   # EOF for the drain thread
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait(timeout=2)
+        self._stdout_thread.join(timeout=2)
         self._stderr_thread.join(timeout=2)
+        self.proc.stdout.close()
+        self.proc.stderr.close()
+
+
+def cleanup_test_lists(binpath):
+    """Delete every uniquely-named scratch list, even after the test server died."""
+    cleanup = Server(binpath)
+    errors = []
+    try:
+        _, listed = cleanup.tool("list_lists", {"include_empty": True})
+        scratch = [item for item in listed.get("lists", [])
+                   if item.get("name") in {TEST_LIST, TARGET_LIST}]
+        for item in scratch:
+            try:
+                cleanup.tool("delete_list", {"list": item["id"]})
+            except Exception as error:
+                errors.append(f"{item.get('name')}: {error}")
+    except Exception as error:
+        errors.append(str(error))
+    finally:
+        cleanup.close()
+    return errors
 
 
 def main():
@@ -186,6 +236,19 @@ def main():
             check(f"tool present: {t}", t in tools)
             if t in tools:
                 check(f"  {t} schema type=object", tools[t]["inputSchema"]["type"] == "object")
+        create_props = tools["create_reminder"]["inputSchema"]["properties"]
+        recurrence_props = create_props["recurrence"]["properties"]
+        frequencies = recurrence_props["frequency"]["enum"]
+        check("recurrence schema does not advertise broken 'days' frequency", "days" not in frequencies,
+              str(frequencies))
+        check("recurrence interval schema is bounded",
+              recurrence_props["interval"].get("minimum") == 1 and
+              recurrence_props["interval"].get("maximum") == 2**31 - 1,
+              str(recurrence_props["interval"]))
+        alarm_minutes = create_props["alarms"]["items"]["properties"]["minutes"]
+        check("alarm minutes schema publishes finite bounds",
+              isinstance(alarm_minutes.get("minimum"), int) and
+              isinstance(alarm_minutes.get("maximum"), int), str(alarm_minutes))
 
         # -- list lifecycle --------------------------------------------------
         print("list lifecycle")
@@ -301,6 +364,19 @@ def main():
         check("update_reminder absolute alarm", any(a.get("type") == "absolute" for a in up.get("alarms", [])), str(up.get("alarms")))
         check("update_reminder recurrence preserved", (up.get("recurrence") or {}).get("frequency") == "weekly", str(up.get("recurrence")))
 
+        # A present field with the wrong type must fail without mutating an
+        # earlier field. It previously became an empty string and silently
+        # cleared notes/url/location.
+        res, data = s.tool("update_reminder", {"identifier": rid, "notes": 42}, expect_error=True)
+        check("wrong-typed update field is rejected", "notes must be a string" in str(data), str(data))
+        _, unchanged = s.tool("get_reminder", {"identifier": rid})
+        check("rejected update leaves notes unchanged",
+              unchanged.get("notes") == TEST_NOTES + " (edited)", str(unchanged.get("notes")))
+        res, data = s.tool("update_reminder", {"identifier": rid, "clear_alarm": 1}, expect_error=True)
+        check("JSON integer is not accepted as a boolean", "clear_alarm must be a boolean" in str(data), str(data))
+        res, data = s.tool("update_reminder", {"identifier": rid, "alarms": "soon"}, expect_error=True)
+        check("wrong-typed alarm collection is rejected", "alarms must be an array" in str(data), str(data))
+
         _, up2 = s.tool("update_reminder", {
             "identifier": rid,
             "notes": "",
@@ -335,7 +411,9 @@ def main():
         # must now come back as isError.
         for label, rec in [("recurrence frequency 8 (days) rejected", {"frequency": 8}),
                            ("recurrence days_of_week [0] rejected", {"frequency": "weekly", "days_of_week": [0]}),
-                           ("recurrence days_of_month [32] rejected", {"frequency": "monthly", "days_of_month": [32]})]:
+                           ("recurrence days_of_month [32] rejected", {"frequency": "monthly", "days_of_month": [32]}),
+                           ("recurrence interval above Int32 rejected", {"frequency": "daily", "interval": 2**31}),
+                           ("recurrence count above Int32 rejected", {"frequency": "daily", "count": 2**31})]:
             res, data = s.tool("create_reminder", {"title": "rec probe", "list_name": TEST_LIST,
                                                    "recurrence": rec}, expect_error=True)
             check(label, res.get("isError") is True, str(data))
@@ -353,17 +431,32 @@ def main():
         msg = s.call("ping")
         check("server alive after bad recurrence input", msg.get("result") == {}, str(msg))
 
-        # -- delete reminder, then list -----------------------------------------
-        print("delete")
+        # -- single-commit list re-home, then delete -----------------------------
+        print("delete / re-home")
+        _, target = s.tool("create_list", {"name": TARGET_LIST})
+        check("re-home target created", target.get("name") == TARGET_LIST, str(target))
+        res, data = s.tool("delete_list", {"list": TEST_LIST, "move_to": TEST_LIST}, expect_error=True)
+        check("delete_list rejects re-homing into itself", "different list" in str(data), str(data))
+        _, still_here = s.tool("get_reminder", {"identifier": rid})
+        check("failed self re-home leaves reminder in source list", still_here.get("list") == TEST_LIST,
+              str(still_here.get("list")))
+
+        _, dl = s.tool("delete_list", {"list": TEST_LIST, "move_to": TARGET_LIST})
+        check("delete_list single-commit re-home ack",
+              dl.get("deleted") is True and dl.get("moved_count") == 1 and
+              dl.get("moved_to") == TARGET_LIST, str(dl))
+        res, data = s.tool("list_reminders", {"list": TEST_LIST}, expect_error=True)
+        check("re-homed source list is gone", res.get("isError") is True, str(data)[:120])
+        _, moved = s.tool("get_reminder", {"identifier": rid})
+        check("re-homed reminder survives in target list", moved.get("list") == TARGET_LIST,
+              str(moved.get("list")))
+
         _, delr = s.tool("delete_reminder", {"identifier": rid})
         check("delete_reminder ack", delr.get("deleted") is True, str(delr))
         res, data = s.tool("get_reminder", {"identifier": rid}, expect_error=True)
         check("deleted reminder not found", res.get("isError") is True, str(data)[:120])
-
-        _, dl = s.tool("delete_list", {"list": TEST_LIST})
-        check("delete_list ack", dl.get("deleted") is True, str(dl))
-        res, data = s.tool("list_reminders", {"list": TEST_LIST}, expect_error=True)
-        check("deleted list not found", res.get("isError") is True, str(data)[:120])
+        _, target_deleted = s.tool("delete_list", {"list": TARGET_LIST})
+        check("delete re-home target ack", target_deleted.get("deleted") is True, str(target_deleted))
 
         # -- protocol edge cases -----------------------------------------------
         print("protocol edges")
@@ -377,8 +470,13 @@ def main():
         msg = s.call("ping")
         check("server survives malformed line", msg.get("result") == {}, str(msg))
 
+    except Exception as error:
+        check("smoke run completed without an exception", False, repr(error))
     finally:
         s.close()
+
+    cleanup_errors = cleanup_test_lists(binpath)
+    check("scratch lists cleaned up", not cleanup_errors, "; ".join(cleanup_errors))
 
     print(f"\n{CHECKS} checks, {len(FAILURES)} failures")
     if s.stderr_lines:
@@ -387,7 +485,6 @@ def main():
             print(f"  {line}")
     if FAILURES:
         print("FAILED:", ", ".join(FAILURES))
-        print(f"cleanup hint: delete list '{TEST_LIST}' by hand if it still exists")
         return 1
     print("ALL PASS")
     return 0

@@ -64,17 +64,26 @@ func recurrenceJSON(_ r: EKRecurrenceRule) -> [String: Any] {
 /// A hundred years either side of the reminder. Wide enough for any real alarm, and it keeps
 /// `m * 60` away from the overflow that traps — a Swift arithmetic trap is not catchable, so an
 /// oversized `minutes` took the whole process down rather than failing the one call.
-let alarmMinutesLimit = 100 * 365 * 24 * 60
+public let alarmMinutesLimit = 100 * 365 * 24 * 60
+public let recurrenceIntegerLimit = Int(Int32.max)
 
 public func alarmFrom(_ a: [String: Any]) throws -> EKAlarm {
-    if let m = a["minutes"] as? Int {
-        // .magnitude, not abs(): abs(Int.min) traps on its own.
-        guard m.magnitude <= UInt(alarmMinutesLimit) else {
+    try rejectUnknownKeys(a, allowed: ["minutes", "date"], name: "alarm")
+    let hasMinutes = a.keys.contains("minutes")
+    let hasDate = a.keys.contains("date")
+    guard hasMinutes != hasDate else {
+        throw MCPErr("Each alarm must contain exactly one of minutes or date")
+    }
+    if hasMinutes {
+        guard let m = try optionalIntegerArg(a["minutes"], name: "alarm.minutes") else {
+            throw MCPErr("alarm.minutes is required")
+        }
+        guard (-alarmMinutesLimit...alarmMinutesLimit).contains(m) else {
             throw MCPErr("alarm.minutes must be within ±\(alarmMinutesLimit) (about a century)")
         }
         return EKAlarm(relativeOffset: TimeInterval(m * 60))
     }
-    if let d = argString(a["date"]) {
+    if let d = try optionalStringArg(a["date"], name: "alarm.date") {
         guard let dt = parseDue(d)?.date else { throw MCPErr("Bad alarm date \"\(d)\"") }
         return EKAlarm(absoluteDate: dt)
     }
@@ -85,37 +94,43 @@ public func alarmFrom(_ a: [String: Any]) throws -> EKAlarm {
 /// values can raise an uncatchable ObjC exception inside EKRecurrenceRule's
 /// initializers — which kills the whole server process, not just the call.
 public func recurrenceFrom(_ a: [String: Any]) throws -> EKRecurrenceRule {
+    try rejectUnknownKeys(
+        a,
+        allowed: [
+            "frequency", "interval", "days_of_week", "days_of_month",
+            "months_of_year", "weeks_of_year", "days_of_year", "set_positions",
+            "until", "count",
+        ],
+        name: "recurrence"
+    )
     // NOTE: the failable inits of these @objc enums are NOT actually failable
     // on this SDK — EKRecurrenceFrequency(rawValue: 9) and EKWeekday(rawValue: 0)
     // both return a non-nil zeroed/invalid case. Never trust them to reject
     // out-of-range values; range-check the Int first. An invalid value that
     // reaches EKRecurrenceRule's init raises an uncatchable ObjC exception,
     // which kills the whole server process instead of failing one call.
-    let freqRaw: Int
-    if let f = a["frequency"] as? Int {
-        guard (1...7).contains(f) else {
-            throw MCPErr("recurrence.frequency integer must be 1-7 (daily/weekly/monthly/yearly/workdays/months/weeks); 8 (\"days\") is silently dropped by this SDK's EKRecurrenceRule")
-        }
-        freqRaw = f
-    } else if let f = a["frequency"] as? String {
-        guard let r = frequencyNameToRaw[f.lowercased()] else {
-            throw MCPErr("recurrence.frequency must be daily/weekly/monthly/yearly/workdays/months/weeks")
-        }
-        freqRaw = r
-    } else {
-        throw MCPErr("recurrence.frequency is required")
+    let frequencyName = try requiredStringArg(a["frequency"], name: "recurrence.frequency").lowercased()
+    guard let freqRaw = frequencyNameToRaw[frequencyName] else {
+        throw MCPErr("recurrence.frequency must be daily/weekly/monthly/yearly/workdays/months/weeks")
     }
-    if let iv = a["interval"] as? Int, iv < 1 {
-        throw MCPErr("recurrence.interval must be >= 1")
+    let interval = try optionalIntegerArg(a["interval"], name: "recurrence.interval") ?? 1
+    guard (1...recurrenceIntegerLimit).contains(interval) else {
+        throw MCPErr("recurrence.interval must be 1-\(recurrenceIntegerLimit)")
     }
-    let interval = max(1, (a["interval"] as? Int) ?? 1)
 
     let end: EKRecurrenceEnd?
-    if let count = a["count"] as? Int {
+    let count = try optionalIntegerArg(a["count"], name: "recurrence.count")
+    let until = try optionalStringArg(a["until"], name: "recurrence.until")
+    if count != nil && until != nil {
+        throw MCPErr("recurrence.count and recurrence.until are alternatives; provide only one")
+    }
+    if let count {
         // 0 used to slip through as "no end" — an accidental infinite recurrence.
-        guard count > 0 else { throw MCPErr("recurrence.count must be >= 1") }
+        guard (1...recurrenceIntegerLimit).contains(count) else {
+            throw MCPErr("recurrence.count must be 1-\(recurrenceIntegerLimit)")
+        }
         end = EKRecurrenceEnd(occurrenceCount: count)
-    } else if let until = argString(a["until"]) {
+    } else if let until {
         guard let d = parseDue(until)?.date else { throw MCPErr("Bad recurrence.until date \"\(until)\"") }
         end = EKRecurrenceEnd(end: d)
     } else {
@@ -123,7 +138,7 @@ public func recurrenceFrom(_ a: [String: Any]) throws -> EKRecurrenceRule {
     }
 
     var dows: [EKRecurrenceDayOfWeek] = []
-    if let arr = a["days_of_week"] as? [Int] {
+    if let arr = try optionalIntegerArrayArg(a["days_of_week"], name: "recurrence.days_of_week") {
         for d in arr {
             // Explicit range check: EKWeekday(rawValue:) is non-failable here (see note above).
             guard (1...7).contains(d) else {
@@ -133,13 +148,13 @@ public func recurrenceFrom(_ a: [String: Any]) throws -> EKRecurrenceRule {
         }
     }
 
-    let dom = try validInts("days_of_month", a["days_of_month"] as? [Int], 1...31)
-    let moy = try validInts("months_of_year", a["months_of_year"] as? [Int], 1...12)
-    let woy = try validInts("weeks_of_year", a["weeks_of_year"] as? [Int], 1...53)
-    let doy = try validInts("days_of_year", a["days_of_year"] as? [Int], 1...366)
+    let dom = try validInts("days_of_month", try optionalIntegerArrayArg(a["days_of_month"], name: "recurrence.days_of_month"), 1...31)
+    let moy = try validInts("months_of_year", try optionalIntegerArrayArg(a["months_of_year"], name: "recurrence.months_of_year"), 1...12)
+    let woy = try validInts("weeks_of_year", try optionalIntegerArrayArg(a["weeks_of_year"], name: "recurrence.weeks_of_year"), 1...53)
+    let doy = try validInts("days_of_year", try optionalIntegerArrayArg(a["days_of_year"], name: "recurrence.days_of_year"), 1...366)
     let sp: [NSNumber]
-    if let arr = a["set_positions"] as? [Int] {
-        for v in arr where !(1...6).contains(Int(exactly: v.magnitude) ?? .max) {
+    if let arr = try optionalIntegerArrayArg(a["set_positions"], name: "recurrence.set_positions") {
+        for v in arr where !((-6 ... -1).contains(v) || (1...6).contains(v)) {
             throw MCPErr("recurrence.set_positions values must be ±1 to ±6")
         }
         sp = arr.map { NSNumber(value: $0) }

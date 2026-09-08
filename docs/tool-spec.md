@@ -8,7 +8,7 @@
 | `create_list` | `name`, optional `color`. Refuses to duplicate an existing list; AppleScript to Reminders.app, then retry-lookup in EventKit (the store lags a beat) |
 | `rename_list` | `list` (name or id), `new_name` → set `title`, `saveCalendar` |
 | `set_list_color` | `list`, `color` `#RRGGBB` → `NSColor`, `saveCalendar` |
-| `delete_list` | `list`, optional `move_to` (re-home its reminders first), then `removeCalendar` |
+| `delete_list` | `list`, optional `move_to` (must be a different, writable list). Re-homing stages every move and the source-list removal, then commits the batch once |
 | `list_reminders` | `list`, `include_completed` (default false), `completed_only`, `due_from`, `due_until`, `query`, `notes_query`, `location_like`, `has_due_date`, `limit` (default 50, max 500). Returns `{count, total, truncated, reminders[]}` |
 | `get_reminder` | `identifier`, or `title` + optional `list_name`; ambiguous titles return up to 10 candidates |
 | `create_reminder` | `title` (required), `list_name`, `notes`, `url`, `location`, `priority` (`none\|high\|medium\|low` or 0/1/5/9), `due`, `start`, `alarms: [{minutes} \| {date}]`, `recurrence` |
@@ -21,7 +21,15 @@
 months_of_year[], weeks_of_year[], days_of_year[], set_positions[], until | count}`.
 `frequency` is daily/weekly/monthly/yearly/workdays/months/weeks — "days" is rejected
 (this SDK corrupts it, see `eventkit-surface.md`). All list fields are range-validated
-before reaching `EKRecurrenceRule`; out-of-range input is a tool error, not a crash.
+before reaching `EKRecurrenceRule`; `interval` and `count` are limited to
+`1...2147483647`. Relative alarm minutes are limited to ±52,560,000 (about a
+century). Out-of-range or wrong-typed input is a tool error, not a crash.
+
+Every supplied argument is type-checked at the tool boundary. In particular,
+wrong-typed update fields are rejected without changing the reminder; they are
+never interpreted as an empty value. Empty strings intentionally clear only
+`notes`, `url`, and `location`. Conflicting set/clear pairs such as `due` plus
+`remove_due` are rejected.
 
 Dates in: ISO-8601 (Z/offset, naive local, fractional seconds) or naive
 `YYYY-MM-DD[THH:MM[:SS[.SSS]]]`; `YYYY-MM-DD` alone means all-day. Time zone left
@@ -37,7 +45,9 @@ wall-clock components.
 MCP: `initialize` (echoes the client's protocolVersion if known, otherwise answers
 with the latest supported — `2025-06-18`; serverInfo `reminders-mcp` 0.1.0), `ping`,
 `tools/list`, `tools/call` returning `{content:[{type:"text",text}], isError}`,
-`-32601` for unknown methods with an id, no response for notifications.
+`-32600` for invalid request envelopes, `-32601` for unknown methods with an id,
+`-32602` for invalid params, and no response for notifications. Malformed JSON
+is `-32700`; valid non-object JSON is `-32600`.
 A `tools/call` sent as a notification (no `id`) is refused rather than executed,
 because a mutation whose result can't be reported is worse than a refusal.
 
@@ -54,4 +64,5 @@ Implementation: pure helpers (date parsing/serialization, priority, colour, recu
 and alarm construction, reminder→JSON) live in the `RemindersCore` library target and are
 unit-tested (`swift test`, no store access); the executable target
 (`Sources/reminders-mcp/`: main, Access, Tools, Protocol) is the stdio server. Live-store
-behaviour is covered by `scripts/smoke_test.py`.
+behaviour is covered by `scripts/smoke_test.py`; non-mutating protocol behaviour
+is covered in CI by `scripts/protocol_test.py`.

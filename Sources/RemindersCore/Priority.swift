@@ -4,7 +4,7 @@
 
 /// EventKit on this SDK only accepts 0, 1, 5, 9 — other values fail the save.
 public func parsePriority(_ v: Any?) throws -> Int {
-    if let i = v as? Int {
+    if let i = jsonInteger(v) {
         guard [0, 1, 5, 9].contains(i) else { throw MCPErr("priority must be 0, 1, 5 or 9") }
         return i
     }

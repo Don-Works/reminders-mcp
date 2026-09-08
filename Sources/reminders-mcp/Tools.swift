@@ -25,17 +25,18 @@ func resolveCalendar(_ ref: String) throws -> EKCalendar {
 /// Resolve a reminder by identifier, or by exact (case/diacritic-insensitive)
 /// title within an optional list. Ambiguous titles list up to 10 candidates.
 func resolveReminder(_ args: [String: Any]) throws -> EKReminder {
-    if let id = argString(args["identifier"]) {
+    if let id = try optionalStringArg(args["identifier"], name: "identifier") {
         guard let r = store.calendarItem(withIdentifier: id) as? EKReminder else {
             throw MCPErr("No reminder with identifier \(id)")
         }
         return r
     }
-    guard let title = argString(args["title"]) else {
+    guard let title = try optionalStringArg(args["title"], name: "title") else {
         throw MCPErr("Provide identifier, or title with optional list_name")
     }
     let cals: [EKCalendar]?
-    if let listName = argString(args["list_name"]) {
+    let listName = try optionalStringArg(args["list_name"], name: "list_name")
+    if let listName {
         cals = [try resolveCalendar(listName)]
     } else {
         cals = nil
@@ -44,7 +45,7 @@ func resolveReminder(_ args: [String: Any]) throws -> EKReminder {
         .filter { cdEqual($0.title, title) }
     switch matches.count {
     case 0:
-        let scope = argString(args["list_name"]).map { " in list \"\($0)\"" } ?? ""
+        let scope = listName.map { " in list \"\($0)\"" } ?? ""
         throw MCPErr("No reminder titled \"\(title)\"\(scope)")
     case 1:
         return matches[0]
@@ -83,7 +84,7 @@ func listJSON(_ c: EKCalendar) throws -> [String: Any] {
 
 func toolListLists(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
-    let includeEmpty = argBool(a["include_empty"], default: true)
+    let includeEmpty = try boolArg(a["include_empty"], name: "include_empty", default: true)
     // One fetch for the whole store, grouped per list — this used to do one
     // fetch per list (N+1 sequential XPC round-trips).
     let all = try fetchReminders(store.predicateForReminders(in: nil))
@@ -102,10 +103,17 @@ func toolListLists(_ a: [String: Any]) throws -> [String: Any] {
 /// AppleScript to Reminders.app, then re-fetch via EventKit.
 func toolCreateList(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
-    guard let name = argString(a["name"]) else { throw MCPErr("name is required") }
+    let name = try requiredStringArg(a["name"], name: "name")
+    let colorText = try optionalStringArg(a["color"], name: "color")
+    let requestedColor = try colorText.map(nsColorFromHex)
     // AppleScript `make new list` does not dedupe by name: if the list already
-    // exists, calling it would create a duplicate. Check first.
-    if let existing = try? resolveCalendar(name) {
+    // exists, calling it would create a duplicate. Check first, and fail closed
+    // if the store already contains ambiguous duplicate names.
+    let existingMatches = allReminderCalendars().filter { cdEqual($0.title, name) }
+    if existingMatches.count > 1 {
+        throw MCPErr("Multiple lists are already named \"\(name)\"; refusing to create another duplicate")
+    }
+    if let existing = existingMatches.first {
         var out = try listJSON(existing)
         out["created"] = false
         out["note"] = "list already existed; not created again"
@@ -155,8 +163,8 @@ func toolCreateList(_ a: [String: Any]) throws -> [String: Any] {
     guard let c = cal else {
         throw MCPErr("AppleScript reported success but EventKit does not see list \"\(name)\" yet — check list_lists")
     }
-    if let color = argString(a["color"]) {
-        c.color = try nsColorFromHex(color)
+    if let requestedColor {
+        c.color = requestedColor
         do { try store.saveCalendar(c, commit: true) }
         catch { throw MCPErr("List created, but saving its color failed: \(error.localizedDescription)") }
     }
@@ -167,9 +175,8 @@ func toolCreateList(_ a: [String: Any]) throws -> [String: Any] {
 
 func toolRenameList(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
-    guard let ref = argString(a["list"]), let newName = argString(a["new_name"]) else {
-        throw MCPErr("list and new_name are required")
-    }
+    let ref = try requiredStringArg(a["list"], name: "list")
+    let newName = try requiredStringArg(a["new_name"], name: "new_name")
     let cal = try resolveCalendar(ref)
     cal.title = newName
     do { try store.saveCalendar(cal, commit: true) }
@@ -179,9 +186,8 @@ func toolRenameList(_ a: [String: Any]) throws -> [String: Any] {
 
 func toolSetListColor(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
-    guard let ref = argString(a["list"]), let color = argString(a["color"]) else {
-        throw MCPErr("list and color are required")
-    }
+    let ref = try requiredStringArg(a["list"], name: "list")
+    let color = try requiredStringArg(a["color"], name: "color")
     let cal = try resolveCalendar(ref)
     cal.color = try nsColorFromHex(color)
     do { try store.saveCalendar(cal, commit: true) }
@@ -191,43 +197,80 @@ func toolSetListColor(_ a: [String: Any]) throws -> [String: Any] {
 
 func toolDeleteList(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
-    guard let ref = argString(a["list"]) else { throw MCPErr("list is required") }
+    let ref = try requiredStringArg(a["list"], name: "list")
+    let targetRef = try optionalStringArg(a["move_to"], name: "move_to")
     let cal = try resolveCalendar(ref)
-    if let targetRef = argString(a["move_to"]) {
+    let sourceName = cal.title
+    if let targetRef {
         let target = try resolveCalendar(targetRef)
-        for r in try fetchReminders(store.predicateForReminders(in: [cal])) {
-            r.calendar = target
-            do { try store.save(r, commit: true) }
-            catch { throw MCPErr("Failed to move \"\(r.title ?? "")\" to \(target.title): \(error.localizedDescription)") }
+        guard target.calendarIdentifier != cal.calendarIdentifier else {
+            throw MCPErr("move_to must be a different list")
         }
+        guard target.allowsContentModifications else {
+            throw MCPErr("Target list \"\(target.title)\" does not allow modifications")
+        }
+        let targetName = target.title
+        let reminders = try fetchReminders(store.predicateForReminders(in: [cal]))
+
+        // Stage every move and the list removal, then commit once. Committing
+        // each reminder separately could leave a half-moved list when a later
+        // save failed. reset() discards uncommitted EventKit changes on error.
+        do {
+            for reminder in reminders {
+                reminder.calendar = target
+                try store.save(reminder, commit: false)
+            }
+            try store.removeCalendar(cal, commit: false)
+            try store.commit()
+        } catch {
+            store.reset()
+            throw MCPErr("delete_list could not move all reminders and remove \"\(sourceName)\": \(error.localizedDescription)")
+        }
+        return [
+            "deleted": true,
+            "name": sourceName,
+            "moved_count": reminders.count,
+            "moved_to": targetName,
+        ]
     }
     do { try store.removeCalendar(cal, commit: true) }
-    catch { throw MCPErr("removeCalendar failed: \(error.localizedDescription)") }
-    return ["deleted": true, "name": cal.title]
+    catch {
+        store.reset()
+        throw MCPErr("removeCalendar failed: \(error.localizedDescription)")
+    }
+    return ["deleted": true, "name": sourceName, "moved_count": 0]
 }
 
 // MARK: - Reminder tools
 
 func toolListReminders(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
-    let includeCompleted = argBool(a["include_completed"], default: false)
-    let completedOnly = argBool(a["completed_only"], default: false)
-    let hasDue = argBool(a["has_due_date"], default: false)
-    let query = argString(a["query"])
-    let notesQuery = argString(a["notes_query"])
-    let locationLike = argString(a["location_like"])
+    let includeCompleted = try boolArg(a["include_completed"], name: "include_completed", default: false)
+    let completedOnly = try boolArg(a["completed_only"], name: "completed_only", default: false)
+    let hasDue = try boolArg(a["has_due_date"], name: "has_due_date", default: false)
+    let query = try optionalStringArg(a["query"], name: "query")
+    let notesQuery = try optionalStringArg(a["notes_query"], name: "notes_query")
+    let locationLike = try optionalStringArg(a["location_like"], name: "location_like")
     // Unparseable bounds are a hard error, not a silently-dropped filter: a
     // wrong query that quietly degrades to "no filter" looks like a right one.
     let from: Date?
-    if let s = argString(a["due_from"]) { from = try parseBoundary(s, upperBoundDateOnlySpansDay: false) } else { from = nil }
+    if let s = try optionalStringArg(a["due_from"], name: "due_from") {
+        from = try parseBoundary(s, upperBoundDateOnlySpansDay: false)
+    } else {
+        from = nil
+    }
     let to: Date?
-    if let s = argString(a["due_until"]) { to = try parseBoundary(s, upperBoundDateOnlySpansDay: true) } else { to = nil }
-    var limit = (a["limit"] as? Int) ?? 50
-    limit = min(max(limit, 1), 500)
+    if let s = try optionalStringArg(a["due_until"], name: "due_until") {
+        to = try parseBoundary(s, upperBoundDateOnlySpansDay: true)
+    } else {
+        to = nil
+    }
+    let limit = try optionalIntegerArg(a["limit"], name: "limit") ?? 50
+    guard (1...500).contains(limit) else { throw MCPErr("limit must be 1-500") }
 
     // Single safe factory (see fetchReminders:) — all narrowing in Swift.
     let cals: [EKCalendar]?
-    if let list = argString(a["list"]) {
+    if let list = try optionalStringArg(a["list"], name: "list") {
         cals = [try resolveCalendar(list)]
     } else {
         cals = nil
@@ -287,10 +330,33 @@ func toolGetReminder(_ a: [String: Any]) throws -> [String: Any] {
 
 func toolCreateReminder(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
-    guard let title = argString(a["title"]) else { throw MCPErr("title is required") }
+    let title = try requiredStringArg(a["title"], name: "title")
+    let listName = try optionalStringArg(a["list_name"], name: "list_name")
+    let notes = try optionalStringArg(a["notes"], name: "notes", allowEmpty: true)
+    let urlText = try optionalStringArg(a["url"], name: "url", allowEmpty: true)
+    let location = try optionalStringArg(a["location"], name: "location", allowEmpty: true)
+    let dueText = try optionalStringArg(a["due"], name: "due")
+    let startText = try optionalStringArg(a["start"], name: "start")
+    let alarmInputs = try optionalObjectArrayArg(a["alarms"], name: "alarms")
+    let recurrenceInput = try optionalObjectArg(a["recurrence"], name: "recurrence")
+
+    let priority: Int?
+    if a.keys.contains("priority") { priority = try parsePriority(a["priority"]) }
+    else { priority = nil }
+    let due = try dueText.map(dueComponents)
+    let start = try startText.map(dueComponents)
+    let alarms = try alarmInputs?.map(alarmFrom)
+    let recurrence = try recurrenceInput.map(recurrenceFrom)
+    let parsedURL: URL?
+    if let urlText, !urlText.isEmpty {
+        guard let url = URL(string: urlText) else { throw MCPErr("Invalid url: \(urlText)") }
+        parsedURL = url
+    } else {
+        parsedURL = nil
+    }
 
     let list: EKCalendar
-    if let listName = argString(a["list_name"]) {
+    if let listName {
         list = try resolveCalendar(listName)
     } else if let d = store.defaultCalendarForNewReminders() {
         list = d
@@ -301,21 +367,20 @@ func toolCreateReminder(_ a: [String: Any]) throws -> [String: Any] {
     var r = EKReminder(eventStore: store)
     r.calendar = list
     r.title = title
-    if let notes = a["notes"] as? String { r.notes = notes.isEmpty ? nil : notes }
-    if let url = a["url"] as? String {
-        if url.isEmpty { r.url = nil }
-        else if let u = URL(string: url) { r.url = u }
-        else { throw MCPErr("Invalid url: \(url)") }
-    }
-    if let location = a["location"] as? String { r.location = location.isEmpty ? nil : location }
-    if let p = a["priority"] { r.priority = try parsePriority(p) }
-    if let due = argString(a["due"]) { r.dueDateComponents = try dueComponents(due) }
-    if let start = argString(a["start"]) { r.startDateComponents = try dueComponents(start) }
-    if let alarms = a["alarms"] as? [[String: Any]] { r.alarms = try alarms.map(alarmFrom) }
-    if let rec = a["recurrence"] as? [String: Any] { r.recurrenceRules = [try recurrenceFrom(rec)] }
+    if let notes { r.notes = notes.isEmpty ? nil : notes }
+    if urlText != nil { r.url = parsedURL }
+    if let location { r.location = location.isEmpty ? nil : location }
+    if let priority { r.priority = priority }
+    if let due { r.dueDateComponents = due }
+    if let start { r.startDateComponents = start }
+    if let alarms { r.alarms = alarms }
+    if let recurrence { r.recurrenceRules = [recurrence] }
 
     do { try store.save(r, commit: true) }
-    catch { throw MCPErr("save failed: \(error.localizedDescription)") }
+    catch {
+        store.reset()
+        throw MCPErr("save failed: \(error.localizedDescription)")
+    }
     if r.calendarItemIdentifier.isEmpty {
         // Some backends assign the identifier only after a re-fetch. Among
         // title matches the one we just created is the newest by creation
@@ -337,41 +402,74 @@ func toolCreateReminder(_ a: [String: Any]) throws -> [String: Any] {
 func toolUpdateReminder(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
     let r = try resolveReminder(a)
-    if let t = argString(a["title"]) { r.title = t }
-    if a["notes"] != nil {
-        let n = a["notes"] as? String ?? ""
-        r.notes = n.isEmpty ? nil : n
+
+    // Validate and construct every requested value before mutating the EventKit
+    // object. A malformed later field must not leave earlier changes pending in
+    // the shared store, where a future commit could persist them accidentally.
+    let newTitle = try optionalStringArg(a["title"], name: "title")
+    let notes = try optionalStringArg(a["notes"], name: "notes", allowEmpty: true)
+    let urlText = try optionalStringArg(a["url"], name: "url", allowEmpty: true)
+    let location = try optionalStringArg(a["location"], name: "location", allowEmpty: true)
+    let dueText = try optionalStringArg(a["due"], name: "due")
+    let startText = try optionalStringArg(a["start"], name: "start")
+    let alarmInputs = try optionalObjectArrayArg(a["alarms"], name: "alarms")
+    let recurrenceInput = try optionalObjectArg(a["recurrence"], name: "recurrence")
+    let move = try optionalStringArg(a["move_to_list"], name: "move_to_list")
+    let removeDue = try boolArg(a["remove_due"], name: "remove_due", default: false)
+    let removeStart = try boolArg(a["remove_start"], name: "remove_start", default: false)
+    let clearAlarm = try boolArg(a["clear_alarm"], name: "clear_alarm", default: false)
+    let clearRecurrence = try boolArg(a["clear_recurrence"], name: "clear_recurrence", default: false)
+
+    if dueText != nil && removeDue { throw MCPErr("due and remove_due cannot be used together") }
+    if startText != nil && removeStart { throw MCPErr("start and remove_start cannot be used together") }
+    if alarmInputs != nil && clearAlarm { throw MCPErr("alarms and clear_alarm cannot be used together") }
+    if recurrenceInput != nil && clearRecurrence {
+        throw MCPErr("recurrence and clear_recurrence cannot be used together")
     }
-    if a["url"] != nil {
-        let u = a["url"] as? String ?? ""
-        if u.isEmpty { r.url = nil }
-        else if let url = URL(string: u) { r.url = url }
-        else { throw MCPErr("Invalid url: \(u)") }
+
+    let priority: Int?
+    if a.keys.contains("priority") { priority = try parsePriority(a["priority"]) }
+    else { priority = nil }
+    let due = try dueText.map(dueComponents)
+    let start = try startText.map(dueComponents)
+    let alarms = try alarmInputs?.map(alarmFrom)
+    let recurrence = try recurrenceInput.map(recurrenceFrom)
+    let target = try move.map(resolveCalendar)
+    let parsedURL: URL?
+    if let urlText, !urlText.isEmpty {
+        guard let url = URL(string: urlText) else { throw MCPErr("Invalid url: \(urlText)") }
+        parsedURL = url
+    } else {
+        parsedURL = nil
     }
-    if a["location"] != nil {
-        let l = a["location"] as? String ?? ""
-        r.location = l.isEmpty ? nil : l
-    }
-    if let p = a["priority"] { r.priority = try parsePriority(p) }
-    if let due = argString(a["due"]) { r.dueDateComponents = try dueComponents(due) }
-    if let start = argString(a["start"]) { r.startDateComponents = try dueComponents(start) }
-    if argBool(a["remove_due"], default: false) { r.dueDateComponents = nil }
-    if argBool(a["remove_start"], default: false) { r.startDateComponents = nil }
-    if let alarms = a["alarms"] as? [[String: Any]] { r.alarms = try alarms.map(alarmFrom) }
-    if argBool(a["clear_alarm"], default: false) { r.alarms = [] }
-    if let rec = a["recurrence"] as? [String: Any] { r.recurrenceRules = [try recurrenceFrom(rec)] }
-    if argBool(a["clear_recurrence"], default: false) { r.recurrenceRules = [] }
-    if let move = argString(a["move_to_list"]) { r.calendar = try resolveCalendar(move) }
+
+    if let newTitle { r.title = newTitle }
+    if let notes { r.notes = notes.isEmpty ? nil : notes }
+    if urlText != nil { r.url = parsedURL }
+    if let location { r.location = location.isEmpty ? nil : location }
+    if let priority { r.priority = priority }
+    if let due { r.dueDateComponents = due }
+    if let start { r.startDateComponents = start }
+    if removeDue { r.dueDateComponents = nil }
+    if removeStart { r.startDateComponents = nil }
+    if let alarms { r.alarms = alarms }
+    if clearAlarm { r.alarms = [] }
+    if let recurrence { r.recurrenceRules = [recurrence] }
+    if clearRecurrence { r.recurrenceRules = [] }
+    if let target { r.calendar = target }
 
     do { try store.save(r, commit: true) }
-    catch { throw MCPErr("save failed: \(error.localizedDescription)") }
+    catch {
+        store.reset()
+        throw MCPErr("save failed: \(error.localizedDescription)")
+    }
     return reminderJSON(r)
 }
 
 func toolCompleteReminder(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
     let r = try resolveReminder(a)
-    if let at = argString(a["completed_at"]) {
+    if let at = try optionalStringArg(a["completed_at"], name: "completed_at") {
         guard let d = parseDue(at)?.date else { throw MCPErr("Bad completed_at date \"\(at)\"") }
         r.completionDate = d   // implies completed
     } else {

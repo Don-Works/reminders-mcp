@@ -18,28 +18,40 @@ func toolSchemas() -> [[String: Any]] {
         "type": "object",
         "description": "{minutes: N} for a relative alarm, or {date: ISO-8601} for absolute",
         "properties": [
-            "minutes": ["type": "integer"],
-            "date": ["type": "string"],
+            "minutes": ["type": "integer", "minimum": -alarmMinutesLimit, "maximum": alarmMinutesLimit],
+            "date": ["type": "string", "minLength": 1],
         ],
+        "oneOf": [["required": ["minutes"]], ["required": ["date"]]],
+        "additionalProperties": false,
     ]
     let recurrenceProp: [String: Any] = [
         "type": "object",
         "properties": [
-            "frequency": ["type": "string", "enum": ["daily", "weekly", "monthly", "yearly", "workdays", "months", "weeks", "days"]],
-            "interval": ["type": "integer", "description": "Every N (default 1, must be >= 1)"],
-            "days_of_week": ["type": "array", "items": ["type": "integer"], "description": "1-7, 1=Sunday"],
-            "days_of_month": ["type": "array", "items": ["type": "integer"], "description": "1-31"],
-            "months_of_year": ["type": "array", "items": ["type": "integer"], "description": "1-12"],
-            "weeks_of_year": ["type": "array", "items": ["type": "integer"], "description": "1-53"],
-            "days_of_year": ["type": "array", "items": ["type": "integer"], "description": "1-366"],
-            "set_positions": ["type": "array", "items": ["type": "integer"], "description": "±1 to ±6 (first/last etc.)"],
-            "until": ["type": "string", "description": "ISO-8601 end date"],
-            "count": ["type": "integer", "description": "Occurrence count, >= 1 (alternative to until)"],
+            "frequency": ["type": "string", "enum": ["daily", "weekly", "monthly", "yearly", "workdays", "months", "weeks"]],
+            "interval": ["type": "integer", "minimum": 1, "maximum": recurrenceIntegerLimit, "description": "Every N (default 1)"],
+            "days_of_week": ["type": "array", "items": ["type": "integer", "minimum": 1, "maximum": 7], "description": "1-7, 1=Sunday"],
+            "days_of_month": ["type": "array", "items": ["type": "integer", "minimum": 1, "maximum": 31], "description": "1-31"],
+            "months_of_year": ["type": "array", "items": ["type": "integer", "minimum": 1, "maximum": 12], "description": "1-12"],
+            "weeks_of_year": ["type": "array", "items": ["type": "integer", "minimum": 1, "maximum": 53], "description": "1-53"],
+            "days_of_year": ["type": "array", "items": ["type": "integer", "minimum": 1, "maximum": 366], "description": "1-366"],
+            "set_positions": [
+                "type": "array",
+                "items": [
+                    "anyOf": [
+                        ["type": "integer", "minimum": -6, "maximum": -1],
+                        ["type": "integer", "minimum": 1, "maximum": 6],
+                    ],
+                ],
+                "description": "±1 to ±6 (first/last etc.)",
+            ],
+            "until": ["type": "string", "minLength": 1, "description": "ISO-8601 end date"],
+            "count": ["type": "integer", "minimum": 1, "maximum": recurrenceIntegerLimit, "description": "Occurrence count (alternative to until)"],
         ],
         "required": ["frequency"],
+        "additionalProperties": false,
     ]
 
-    return [
+    let tools: [[String: Any]] = [
         [
             "name": "list_lists",
             "description": "List all reminder lists with id, name, color, flags, source, and open/completed counts.",
@@ -111,7 +123,7 @@ func toolSchemas() -> [[String: Any]] {
                     "notes_query": ["type": "string", "description": "Notes contain"],
                     "location_like": ["type": "string", "description": "Location contains"],
                     "has_due_date": ["type": "boolean", "description": "Only reminders with a due date"],
-                    "limit": ["type": "integer", "description": "Default 50, max 500"],
+                    "limit": ["type": "integer", "minimum": 1, "maximum": 500, "description": "Default 50, max 500"],
                 ],
             ],
         ],
@@ -206,6 +218,14 @@ func toolSchemas() -> [[String: Any]] {
             ],
         ],
     ]
+    return tools.map { tool in
+        var closedTool = tool
+        if var inputSchema = tool["inputSchema"] as? [String: Any] {
+            inputSchema["additionalProperties"] = false
+            closedTool["inputSchema"] = inputSchema
+        }
+        return closedTool
+    }
 }
 
 typealias ToolHandler = ([String: Any]) throws -> [String: Any]
@@ -224,6 +244,13 @@ let handlers: [String: ToolHandler] = [
     "uncomplete_reminder": toolUncompleteReminder,
     "delete_reminder": toolDeleteReminder,
 ]
+
+func validateToolArguments(_ arguments: [String: Any], for toolName: String) throws {
+    guard let tool = toolSchemas().first(where: { $0["name"] as? String == toolName }),
+          let schema = tool["inputSchema"] as? [String: Any],
+          let properties = schema["properties"] as? [String: Any] else { return }
+    try rejectUnknownKeys(arguments, allowed: Set(properties.keys), name: toolName)
+}
 
 // MARK: - JSON-RPC dispatch
 
@@ -265,12 +292,29 @@ func resultInitialize(_ params: [String: Any]?) -> [String: Any] {
 }
 
 func handle(_ req: [String: Any]) -> [String: Any]? {
-    guard let method = req["method"] as? String else {
-        return errorResponse(req["id"], code: -32600, message: "Invalid request: missing method")
+    let hasID = req.keys.contains("id")
+    let id = req["id"]
+    let isNotification = !hasID
+
+    guard req["jsonrpc"] as? String == "2.0" else {
+        return errorResponse(hasID ? id : nil, code: -32600, message: "Invalid request: jsonrpc must be \"2.0\"")
     }
-    let id = req["id"]          // nil for notifications
-    let isNotification = (id == nil) || (id is NSNull)
-    let params = req["params"] as? [String: Any]
+    if let id, !(id is NSNull), !(id is String), !isJSONNumber(id) {
+        return errorResponse(nil, code: -32600, message: "Invalid request: id must be a string, number, or null")
+    }
+    guard let method = req["method"] as? String else {
+        return errorResponse(hasID ? id : nil, code: -32600, message: "Invalid request: missing method")
+    }
+    let params: [String: Any]?
+    if let rawParams = req["params"] {
+        guard let object = rawParams as? [String: Any] else {
+            if isNotification { return nil }
+            return errorResponse(id, code: -32602, message: "Invalid params: this server accepts named parameters as an object")
+        }
+        params = object
+    } else {
+        params = nil
+    }
 
     var result: Any
     switch method {
@@ -281,7 +325,8 @@ func handle(_ req: [String: Any]) -> [String: Any]? {
     case "tools/list":
         result = ["tools": toolSchemas()]
     case "notifications/initialized":
-        return nil   // notification, never responds
+        if isNotification { return nil }
+        result = [String: Any]()
     case "tools/call":
         if isNotification {
             // A tools/call without an id can't get a result back. Executing a
@@ -289,10 +334,21 @@ func handle(_ req: [String: Any]) -> [String: Any]? {
             FileHandle.standardError.write("reminders-mcp: ignoring tools/call sent as a notification (no id)\n".data(using: .utf8)!)
             return nil
         }
-        if let name = params?["name"] as? String {
+        if let name = try? requiredStringArg(params?["name"], name: "tools/call.name") {
             if let handler = handlers[name] {
-                let args: [String: Any] = params?["arguments"] as? [String: Any] ?? [:]
-                let outcome = Result { try handler(args) }
+                let args: [String: Any]
+                if let rawArguments = params?["arguments"] {
+                    guard let object = rawArguments as? [String: Any] else {
+                        return errorResponse(id, code: -32602, message: "Invalid params: tools/call.arguments must be an object")
+                    }
+                    args = object
+                } else {
+                    args = [:]
+                }
+                let outcome = Result {
+                    try validateToolArguments(args, for: name)
+                    return try handler(args)
+                }
                 switch outcome {
                 case let .success(out):
                     result = ["content": [["type": "text", "text": jsonString(out)]], "isError": false]
@@ -303,7 +359,7 @@ func handle(_ req: [String: Any]) -> [String: Any]? {
                 result = toolError("Unknown tool: \(name)")
             }
         } else {
-            result = toolError("tools/call requires a name")
+            return errorResponse(id, code: -32602, message: "Invalid params: tools/call.name must be a non-empty string")
         }
     default:
         if isNotification { return nil }
@@ -311,5 +367,5 @@ func handle(_ req: [String: Any]) -> [String: Any]? {
     }
 
     if isNotification { return nil }
-    return ["jsonrpc": "2.0", "id": id!, "result": result]
+    return ["jsonrpc": "2.0", "id": id ?? NSNull(), "result": result]
 }

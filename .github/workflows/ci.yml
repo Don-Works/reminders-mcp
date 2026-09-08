@@ -11,13 +11,26 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: macos-14
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Unit tests
-        run: swift test
+        run: swift test -Xswiftc -warnings-as-errors
       - name: Release build
-        run: swift build -c release
+        run: swift build -c release -Xswiftc -warnings-as-errors
+      - name: JSON-RPC and MCP protocol checks
+        run: python3 scripts/protocol_test.py .build/release/reminders-mcp

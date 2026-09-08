@@ -25,13 +25,24 @@ while let line = readLine(strippingNewline: true) {
     let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.isEmpty { continue }
     let response: [String: Any]?
+    guard let data = trimmed.data(using: .utf8) else {
+        writeJSON(errorResponse(nil, code: -32700, message: "Parse error: input was not UTF-8"))
+        continue
+    }
+    let object: Any
     do {
-        guard let data = trimmed.data(using: .utf8) else { throw MCPErr("not UTF-8") }
-        let obj = try JSONSerialization.jsonObject(with: data)
-        guard let req = obj as? [String: Any] else { throw MCPErr("not a JSON object") }
-        response = handle(req)
+        object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
     } catch {
         response = errorResponse(nil, code: -32700, message: "Parse error: \(error.localizedDescription)")
+        if let response { writeJSON(response) }
+        continue
+    }
+    if let request = object as? [String: Any] {
+        response = handle(request)
+    } else {
+        // Valid JSON with the wrong top-level shape is an invalid request, not
+        // a parse error. Batch requests are intentionally unsupported by MCP.
+        response = errorResponse(nil, code: -32600, message: "Invalid request: expected a JSON object")
     }
     if let r = response { writeJSON(r) }
 }

@@ -30,8 +30,8 @@ final class RecurrenceTests: XCTestCase {
         let weekly = try rec(["frequency": "weekly", "days_of_week": [2], "until": "2099-01-01"])
         XCTAssertNotNil(weekly.recurrenceEnd?.endDate)
 
-        // "days" (raw 8) exists in the ObjC enum but EKRecurrenceRule silently
-        // corrupts it to raw 0 — must be rejected, not silently built.
+        // "days" exists in the ObjC enum but EKRecurrenceRule silently corrupts
+        // it to raw 0. The public contract accepts named, supported values only.
         XCTAssertThrowsError(try rec(["frequency": 8]))
         XCTAssertThrowsError(try rec(["frequency": "days"]))
     }
@@ -55,7 +55,12 @@ final class RecurrenceTests: XCTestCase {
         XCTAssertThrowsError(try rec(["frequency": "monthly", "set_positions": [0]]))
         XCTAssertThrowsError(try rec(["frequency": "monthly", "set_positions": [-7]]))
         XCTAssertThrowsError(try rec(["frequency": "daily", "interval": 0]))
+        XCTAssertThrowsError(try rec(["frequency": "daily", "interval": recurrenceIntegerLimit + 1]))
         XCTAssertThrowsError(try rec(["frequency": "daily", "count": 0]))
+        XCTAssertThrowsError(try rec(["frequency": "daily", "count": recurrenceIntegerLimit + 1]))
+        XCTAssertThrowsError(try rec(["frequency": "daily", "count": 2, "until": "2099-01-01"]))
+        XCTAssertThrowsError(try rec(["frequency": "weekly", "days_of_week": "monday"]))
+        XCTAssertThrowsError(try rec(["frequency": "weekly", "days_of_week": [true]]))
     }
 
     func testAlarmFrom() throws {
@@ -65,6 +70,9 @@ final class RecurrenceTests: XCTestCase {
         XCTAssertNotNil(abs.absoluteDate)
         XCTAssertThrowsError(try alarmFrom([:]))
         XCTAssertThrowsError(try alarmFrom(["date": "someday"]))
+        XCTAssertThrowsError(try alarmFrom(["minutes": true]))
+        XCTAssertThrowsError(try alarmFrom(["minutes": 10, "date": "2099-01-01"]))
+        XCTAssertThrowsError(try alarmFrom(["minutes": 10, "offset": 10]))
     }
 
     // Swift traps on overflow and a trap cannot be caught, so these took the whole server
@@ -75,6 +83,7 @@ final class RecurrenceTests: XCTestCase {
         XCTAssertThrowsError(try alarmFrom(["minutes": Int.min]))
         XCTAssertThrowsError(try recurrenceFrom(["frequency": "weekly", "set_positions": [Int.min]]))
         XCTAssertThrowsError(try recurrenceFrom(["frequency": "weekly", "set_positions": [Int.max]]))
+        XCTAssertThrowsError(try recurrenceFrom(["frequency": "weekly", "weekday": 2]))
         XCTAssertNoThrow(try alarmFrom(["minutes": -15]))
         XCTAssertNoThrow(try recurrenceFrom(["frequency": "weekly", "set_positions": [-1]]))
     }

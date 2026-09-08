@@ -66,13 +66,17 @@ in [`docs/tool-spec.md`](docs/tool-spec.md).
 python3 scripts/smoke_test.py
 ```
 
-Spawns the release binary and runs 85 checks against the live Reminders store —
-the whole handshake and all twelve tools, create through delete, in a scratch
-list it cleans up afterwards, plus the regression probes (summer all-day
-dates, whole-day `due_until`, unparseable-boundary errors, out-of-range
-recurrence input). Exit code 0 means every check passed. Needs a live
-Reminders store (it creates and deletes real rows, so it cannot run in CI) —
-`swift test` covers the store-independent parsing/serialization logic.
+Spawns the release binary and exercises the whole handshake and all twelve
+tools, create through single-commit list re-homing and delete, in uniquely
+named scratch lists. It also probes summer all-day dates, whole-day
+`due_until`, strict argument types, bounded recurrence/alarm input, and server
+survival after bad requests. A fresh process removes any scratch lists even
+when the test run fails. It needs a live Reminders store, so it cannot run in
+CI.
+
+`swift test` covers the store-independent logic. CI additionally runs
+`python3 scripts/protocol_test.py .build/release/reminders-mcp`, a non-mutating
+JSON-RPC/MCP conformance suite that needs no Reminders permission.
 
 ## Notes on EventKit
 
