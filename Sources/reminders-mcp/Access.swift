@@ -13,6 +13,22 @@ var access: AccessState = .unknown
 /// switch in System Settings, without requiring a server restart.
 let deniedRepromptAfter: TimeInterval = 120
 
+/// A first-run request is a human interaction, not an EventKit fetch. Give an
+/// unlocked session enough time to answer the prompt, while still bounding a
+/// daemon call when no UI can be shown.
+let accessPromptTimeout: DispatchTimeInterval = .seconds(20)
+
+private func authorizationStatusName(_ status: EKAuthorizationStatus) -> String {
+    switch status {
+    case .notDetermined: return "not determined"
+    case .restricted: return "restricted"
+    case .denied: return "denied"
+    case .fullAccess: return "full access"
+    case .writeOnly: return "write only"
+    @unknown default: return "unknown (raw value \(status.rawValue))"
+    }
+}
+
 func ensureAccess() throws {
     switch access {
     case .granted:
@@ -23,6 +39,23 @@ func ensureAccess() throws {
         break   // re-ask (a denial older than deniedRepromptAfter falls through here)
     }
 
+    // Ask only when macOS has not recorded a choice. In particular, do not
+    // turn a durable denial/restriction into an apparently hung MCP call.
+    let status = EKEventStore.authorizationStatus(for: .reminder)
+    switch status {
+    case .fullAccess:
+        access = .granted
+        return
+    case .denied, .restricted, .writeOnly:
+        let why = authorizationStatusName(status)
+        access = .denied(why, at: Date())
+        throw MCPErr("Reminders access is \(why) for the app responsible for this server. Grant full access in System Settings → Privacy & Security → Reminders, then retry.")
+    case .notDetermined:
+        break
+    @unknown default:
+        break
+    }
+
     let sem = DispatchSemaphore(value: 0)
     var granted = false
     var why = ""
@@ -31,8 +64,9 @@ func ensureAccess() throws {
         why = err?.localizedDescription ?? ""
         sem.signal()
     }
-    if sem.wait(timeout: .now() + 10) == .timedOut {
-        throw MCPErr("Timed out waiting for Reminders access")
+    if sem.wait(timeout: .now() + accessPromptTimeout) == .timedOut {
+        let current = authorizationStatusName(EKEventStore.authorizationStatus(for: .reminder))
+        throw MCPErr("macOS is still waiting for a Reminders permission choice (status: \(current)). Keep the login session unlocked and approve the prompt for the responsible app—for a Maix gateway, approve Maix, not only your terminal. If no prompt is visible, enable Maix in System Settings → Privacy & Security → Reminders, then retry.")
     }
     if granted {
         access = .granted

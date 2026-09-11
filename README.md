@@ -31,12 +31,16 @@ Register it with any MCP client as a stdio server pointing at that binary.
 
 The first tool call triggers the macOS Reminders permission prompt, and
 `create_list` goes through AppleScript to Reminders.app, which triggers an
-Automation prompt.
+Automation prompt. Make that first call while the desktop is logged in and
+unlocked so the prompts can be answered.
 
-Both prompts need a process that can show UI. A binary spawned by a `launchd`
-daemon cannot display them — the request times out silently and every store call
-then blocks. Run the binary once from a terminal to grant access before wiring it
-into a daemon-hosted gateway.
+macOS grants privacy access to the *responsible app*, not just to this helper's
+binary. Running the helper directly can therefore grant access to Terminal (or
+another terminal app) without granting it to a daemon-hosted gateway. For Maix,
+make one Reminders tool call through Maix and approve **Maix** when prompted. If
+the prompt was missed, enable Maix under System Settings → Privacy & Security →
+Reminders and retry. A timed-out first call now reports this distinction instead
+of implying that the Reminders store is wedged.
 
 ## Tools
 
