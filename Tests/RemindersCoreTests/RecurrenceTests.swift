@@ -17,6 +17,28 @@ final class RecurrenceTests: XCTestCase {
         XCTAssertEqual(r.daysOfTheWeek?.count, 2)
     }
 
+    // The name table was off by one: "weekly" stored FREQ=MONTHLY, "yearly" and
+    // the extra names stored FREQ=DAILY, and reads mapped them back to the
+    // requested name. Check what EventKit actually holds, then the read-back.
+    func testFrequencyNamesMatchEventKit() throws {
+        let cases: [(String, EKRecurrenceFrequency, String)] = [
+            ("daily", .daily, "FREQ=DAILY"), ("weekly", .weekly, "FREQ=WEEKLY"),
+            ("monthly", .monthly, "FREQ=MONTHLY"), ("yearly", .yearly, "FREQ=YEARLY"),
+        ]
+        let store = EKEventStore()
+        for (name, freq, rrule) in cases {
+            let rule = try rec(["frequency": name])
+            XCTAssertEqual(rule.frequency, freq, name)
+            XCTAssertTrue(rule.description.contains(rrule), "\(name): \(rule.description)")
+            let r = EKReminder(eventStore: store)
+            r.recurrenceRules = [rule]
+            XCTAssertEqual((reminderJSON(r)["recurrence"] as? [String: Any])?["frequency"] as? String, name)
+        }
+        for name in ["workdays", "months", "weeks"] {
+            XCTAssertThrowsError(try rec(["frequency": name]), "\(name) is not an EventKit frequency")
+        }
+    }
+
     func testValidRangesAndEnds() throws {
         let monthly = try rec([
             "frequency": "monthly",

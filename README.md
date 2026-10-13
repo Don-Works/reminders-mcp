@@ -9,8 +9,9 @@ Open source by [Revitt](https://revitt.co/?utm_source=reminders-mcp&utm_medium=r
 [![Platform: macOS 14+](https://img.shields.io/badge/macOS-14%2B-7c5cff.svg)](#requirements)
 
 `reminders-mcp` is a single Swift binary that puts the macOS Reminders store
-behind MCP. Twelve tools over EventKit — lists and reminders, due dates, alarms,
-recurrence rules, priorities, notes, URLs, locations — spoken as newline-delimited
+behind MCP. Twelve tools over EventKit — lists and reminders, due dates, alarms
+(absolute, relative to due, and arrive/leave location alarms), recurrence rules,
+priorities, notes, URLs — spoken as newline-delimited
 JSON-RPC on stdio. No runtime dependencies beyond the macOS SDK.
 
 ## Requirements
@@ -48,9 +49,9 @@ into a daemon-hosted gateway.
 | `delete_list` | Delete, optionally re-homing its reminders first |
 | `list_reminders` | Query with list, completion, due range, text, and limit filters |
 | `get_reminder` | By identifier, or by exact title scoped to a list |
-| `create_reminder` | Title plus notes, url, location, priority, due, start, alarms, recurrence |
+| `create_reminder` | Title plus notes, url, priority, due, start, alarms (incl. location), recurrence |
 | `update_reminder` | Same fields, plus clearing them and moving between lists |
-| `complete_reminder` | Optionally with an explicit completion date |
+| `complete_reminder` | Optionally with an explicit completion date; reports `recurring` and `next_due` |
 | `uncomplete_reminder` | Reopen a completed reminder |
 | `delete_reminder` | Delete by identifier or title |
 
@@ -87,8 +88,9 @@ with nil bounds takes the process down, KVC-composed predicates crash the
 fetch — only store-factory predicates survive, so all query narrowing here
 happens in Swift — and `EKWeekday`/`EKRecurrenceFrequency`'s failable inits
 are not actually failable, so recurrence input is range-checked before it
-reaches `EKRecurrenceRule`. There is no calendar-creation API and no
-sub-reminders.
+reaches `EKRecurrenceRule`. There is no calendar-creation API, and no
+tags, flags, sub-reminders or sections. `EKReminder.location` is not persisted, so
+a place is a location alarm.
 
 ## License
 

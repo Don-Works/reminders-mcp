@@ -14,20 +14,41 @@ func toolSchemas() -> [[String: Any]] {
         "list_name": ["type": "string", "description": "List name or id to scope the title lookup"],
     ]
     let dueProp: [String: Any] = ["type": "string", "description": "ISO-8601, or YYYY-MM-DD for all-day"]
+    let alarmMinutes: [String: Any] = [
+        "type": "integer", "minimum": -alarmMinutesLimit, "maximum": alarmMinutesLimit,
+        "description": "Minutes relative to the due date; negative = before (-15 = 15 minutes before). Needs a due date.",
+    ]
     let alarmItem: [String: Any] = [
         "type": "object",
-        "description": "{minutes: N} for a relative alarm, or {date: ISO-8601} for absolute",
+        "description": alarmShapeHelp,
         "properties": [
-            "minutes": ["type": "integer", "minimum": -alarmMinutesLimit, "maximum": alarmMinutesLimit],
-            "date": ["type": "string", "minLength": 1],
+            "relative_minutes": alarmMinutes,
+            "minutes": ["type": "integer", "minimum": -alarmMinutesLimit, "maximum": alarmMinutesLimit, "description": "Alias of relative_minutes"],
+            "date": ["type": "string", "minLength": 1, "description": "Absolute alarm time, ISO-8601"],
+            "location": [
+                "type": "object",
+                "description": "Location alarm: fires on arriving at or leaving this place",
+                "properties": [
+                    "title": ["type": "string", "minLength": 1, "description": "Place name; reads back as the reminder's location"],
+                    "lat": ["type": "number", "minimum": -90, "maximum": 90],
+                    "lon": ["type": "number", "minimum": -180, "maximum": 180],
+                    "radius_m": ["type": "number", "exclusiveMinimum": 0, "maximum": alarmRadiusLimit, "description": "Geofence radius in metres (default: system default)"],
+                ],
+                "required": ["title", "lat", "lon"],
+                "additionalProperties": false,
+            ],
+            "proximity": ["type": "string", "enum": ["arrive", "leave"], "description": "Location alarms only (default arrive)"],
         ],
-        "oneOf": [["required": ["minutes"]], ["required": ["date"]]],
+        "oneOf": [
+            ["required": ["relative_minutes"]], ["required": ["minutes"]],
+            ["required": ["date"]], ["required": ["location"]],
+        ],
         "additionalProperties": false,
     ]
     let recurrenceProp: [String: Any] = [
         "type": "object",
         "properties": [
-            "frequency": ["type": "string", "enum": ["daily", "weekly", "monthly", "yearly", "workdays", "months", "weeks"]],
+            "frequency": ["type": "string", "enum": ["daily", "weekly", "monthly", "yearly"], "description": "For workdays use weekly with days_of_week [2,3,4,5,6]"],
             "interval": ["type": "integer", "minimum": 1, "maximum": recurrenceIntegerLimit, "description": "Every N (default 1)"],
             "days_of_week": ["type": "array", "items": ["type": "integer", "minimum": 1, "maximum": 7], "description": "1-7, 1=Sunday"],
             "days_of_month": ["type": "array", "items": ["type": "integer", "minimum": 1, "maximum": 31], "description": "1-31"],
@@ -51,6 +72,12 @@ func toolSchemas() -> [[String: Any]] {
         "additionalProperties": false,
     ]
 
+    // Kept in the schema only so a caller gets the specific rejection (see
+    // rejectLocationArg) instead of a generic unknown-field error.
+    let locationProp: [String: Any] = [
+        "type": "string",
+        "description": "Not supported: Apple Reminders does not store a plain location and this is rejected. Use a location alarm in alarms.",
+    ]
     let tools: [[String: Any]] = [
         [
             "name": "list_lists",
@@ -137,7 +164,7 @@ func toolSchemas() -> [[String: Any]] {
         ],
         [
             "name": "create_reminder",
-            "description": "Create a reminder. Due dates are ISO-8601 or YYYY-MM-DD (all-day); time zone left floating. Fractional seconds are accepted.",
+            "description": "Create a reminder. Due dates are ISO-8601 or YYYY-MM-DD (all-day); time zone left floating. Fractional seconds are accepted. Apple Reminders stores a place only as a location alarm, so set a location with alarms: [{location: {title, lat, lon}, proximity: \"arrive\"}]; a plain location argument is rejected.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -145,7 +172,7 @@ func toolSchemas() -> [[String: Any]] {
                     "list_name": ["type": "string", "description": "List name or id (default: the default list)"],
                     "notes": ["type": "string"],
                     "url": ["type": "string"],
-                    "location": ["type": "string"],
+                    "location": locationProp,
                     "priority": ["type": ["string", "integer"], "description": "none/high/medium/low or 0/1/5/9"],
                     "due": dueProp,
                     "start": ["type": "string", "description": "ISO-8601 or YYYY-MM-DD start of a period"],
@@ -157,7 +184,7 @@ func toolSchemas() -> [[String: Any]] {
         ],
         [
             "name": "update_reminder",
-            "description": "Update a reminder found by identifier or title+list_name. Pass empty string to clear notes/url/location. remove_due/remove_start/clear_alarm/clear_recurrence clear those fields; move_to_list moves it.",
+            "description": "Update a reminder found by identifier or title+list_name. Pass empty string to clear notes/url. A location is set with a location alarm (see create_reminder). remove_due/remove_start/clear_alarm/clear_recurrence clear those fields; move_to_list moves it.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -166,7 +193,7 @@ func toolSchemas() -> [[String: Any]] {
                     "list_name": ["type": "string", "description": "Scope for the title lookup"],
                     "notes": ["type": "string"],
                     "url": ["type": "string"],
-                    "location": ["type": "string"],
+                    "location": locationProp,
                     "priority": ["type": ["string", "integer"], "description": "none/high/medium/low or 0/1/5/9"],
                     "due": dueProp,
                     "start": ["type": "string"],
@@ -182,7 +209,7 @@ func toolSchemas() -> [[String: Any]] {
         ],
         [
             "name": "complete_reminder",
-            "description": "Mark a reminder completed (completion date now, or completed_at if given).",
+            "description": "Mark a reminder completed (completion date now, or completed_at if given). Returns completed and recurring. For a recurring reminder EventKit saves the completed occurrence as a separate reminder (completed_occurrence) and moves this identifier to the next occurrence (next_due), so is_completed reads false on it.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

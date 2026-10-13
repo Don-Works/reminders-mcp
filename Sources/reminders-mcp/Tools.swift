@@ -295,7 +295,7 @@ func toolListReminders(_ a: [String: Any]) throws -> [String: Any] {
     if hasDue { out = out.filter { $0.dueDateComponents != nil } }
     if let q = query { out = out.filter { cdContains($0.title, q) } }
     if let nq = notesQuery { out = out.filter { cdContains($0.notes, nq) } }
-    if let ll = locationLike { out = out.filter { cdContains($0.location, ll) } }
+    if let ll = locationLike { out = out.filter { cdContains(reminderLocation($0), ll) } }
 
     // dueDateComponents is NSDateComponents — sort in Swift.
     let sorted = out.sorted { (l: EKReminder, r: EKReminder) -> Bool in
@@ -334,7 +334,7 @@ func toolCreateReminder(_ a: [String: Any]) throws -> [String: Any] {
     let listName = try optionalStringArg(a["list_name"], name: "list_name")
     let notes = try optionalStringArg(a["notes"], name: "notes", allowEmpty: true)
     let urlText = try optionalStringArg(a["url"], name: "url", allowEmpty: true)
-    let location = try optionalStringArg(a["location"], name: "location", allowEmpty: true)
+    try rejectLocationArg(a)
     let dueText = try optionalStringArg(a["due"], name: "due")
     let startText = try optionalStringArg(a["start"], name: "start")
     let alarmInputs = try optionalObjectArrayArg(a["alarms"], name: "alarms")
@@ -346,6 +346,7 @@ func toolCreateReminder(_ a: [String: Any]) throws -> [String: Any] {
     let due = try dueText.map(dueComponents)
     let start = try startText.map(dueComponents)
     let alarms = try alarmInputs?.map(alarmFrom)
+    if let alarms, due == nil, hasRelativeAlarm(alarms) { throw relativeAlarmNeedsDue }
     let recurrence = try recurrenceInput.map(recurrenceFrom)
     let parsedURL: URL?
     if let urlText, !urlText.isEmpty {
@@ -369,7 +370,6 @@ func toolCreateReminder(_ a: [String: Any]) throws -> [String: Any] {
     r.title = title
     if let notes { r.notes = notes.isEmpty ? nil : notes }
     if urlText != nil { r.url = parsedURL }
-    if let location { r.location = location.isEmpty ? nil : location }
     if let priority { r.priority = priority }
     if let due { r.dueDateComponents = due }
     if let start { r.startDateComponents = start }
@@ -409,7 +409,7 @@ func toolUpdateReminder(_ a: [String: Any]) throws -> [String: Any] {
     let newTitle = try optionalStringArg(a["title"], name: "title")
     let notes = try optionalStringArg(a["notes"], name: "notes", allowEmpty: true)
     let urlText = try optionalStringArg(a["url"], name: "url", allowEmpty: true)
-    let location = try optionalStringArg(a["location"], name: "location", allowEmpty: true)
+    try rejectLocationArg(a)
     let dueText = try optionalStringArg(a["due"], name: "due")
     let startText = try optionalStringArg(a["start"], name: "start")
     let alarmInputs = try optionalObjectArrayArg(a["alarms"], name: "alarms")
@@ -433,6 +433,10 @@ func toolUpdateReminder(_ a: [String: Any]) throws -> [String: Any] {
     let due = try dueText.map(dueComponents)
     let start = try startText.map(dueComponents)
     let alarms = try alarmInputs?.map(alarmFrom)
+    let effectiveDue = due ?? (removeDue ? nil : r.dueDateComponents)
+    if effectiveDue == nil, hasRelativeAlarm(alarms ?? (clearAlarm ? [] : r.alarms ?? [])) {
+        throw relativeAlarmNeedsDue
+    }
     let recurrence = try recurrenceInput.map(recurrenceFrom)
     let target = try move.map(resolveCalendar)
     let parsedURL: URL?
@@ -446,7 +450,6 @@ func toolUpdateReminder(_ a: [String: Any]) throws -> [String: Any] {
     if let newTitle { r.title = newTitle }
     if let notes { r.notes = notes.isEmpty ? nil : notes }
     if urlText != nil { r.url = parsedURL }
-    if let location { r.location = location.isEmpty ? nil : location }
     if let priority { r.priority = priority }
     if let due { r.dueDateComponents = due }
     if let start { r.startDateComponents = start }
@@ -469,6 +472,7 @@ func toolUpdateReminder(_ a: [String: Any]) throws -> [String: Any] {
 func toolCompleteReminder(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()
     let r = try resolveReminder(a)
+    let recurring = r.hasRecurrenceRules && !r.isCompleted
     if let at = try optionalStringArg(a["completed_at"], name: "completed_at") {
         guard let d = parseDue(at)?.date else { throw MCPErr("Bad completed_at date \"\(at)\"") }
         r.completionDate = d   // implies completed
@@ -476,9 +480,46 @@ func toolCompleteReminder(_ a: [String: Any]) throws -> [String: Any] {
         r.isCompleted = true    // sets completionDate to now automatically
     }
     do { try store.save(r, commit: true) }
-    catch { throw MCPErr("save failed: \(error.localizedDescription)") }
-    return reminderJSON(r)
+    catch {
+        store.reset()
+        throw MCPErr("save failed: \(error.localizedDescription)")
+    }
+    var out = reminderJSON(r)
+    out["completed"] = true
+    out["recurring"] = recurring
+    guard recurring else { return out }
+    guard !r.isCompleted else {
+        // Seen for a series whose occurrence was far in the future (2099):
+        // EventKit marked the whole series done instead of advancing it.
+        out["next_due"] = NSNull()
+        out["note"] = "Recurring reminder: EventKit completed the whole series and created no next occurrence."
+        return out
+    }
+
+    // EventKit completes one occurrence of a recurring reminder by saving a
+    // completed copy without the rule, and moving this identifier on to the next
+    // occurrence. Say so, and point at the copy.
+    out["next_due"] = out["due_date"]
+    out["note"] = "Recurring reminder: this occurrence was completed as a separate reminder (completed_occurrence) and this identifier now holds the next occurrence, so is_completed is false here."
+    // The save already happened; a failed lookup must not turn it into an error.
+    let copy = ((try? fetchReminders(store.predicateForReminders(in: r.calendar.map { [$0] }))) ?? [])
+        .filter {
+            $0.isCompleted && !$0.hasRecurrenceRules && cdEqual($0.title, r.title ?? "")
+                && $0.calendarItemIdentifier != r.calendarItemIdentifier
+        }
+        .max { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
+    out["completed_occurrence"] = copy.map(reminderJSON) ?? NSNull()
+    return out
 }
+
+/// EKReminder.location is not persisted by EventKit (verified 2026-10-13): it
+/// read back nil after every save. A place is a location alarm instead.
+func rejectLocationArg(_ a: [String: Any]) throws {
+    guard a.keys.contains("location") else { return }
+    throw MCPErr("location is not stored by Apple Reminders as a plain field, so it is not accepted. Add a location alarm instead: alarms: [{location: {title, lat, lon, radius_m?}, proximity: \"arrive\"|\"leave\"}]. The reminder's location then reads back from that alarm's title.")
+}
+
+let relativeAlarmNeedsDue = MCPErr("A relative alarm fires relative to the due date, so the reminder needs a due date. Set due, or use {date: ISO-8601} or a location alarm.")
 
 func toolUncompleteReminder(_ a: [String: Any]) throws -> [String: Any] {
     try ensureAccess()

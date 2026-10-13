@@ -402,6 +402,64 @@ def main():
         _, un = s.tool("uncomplete_reminder", {"identifier": rid})
         check("uncomplete_reminder", un.get("is_completed") is False, str(un.get("is_completed")))
 
+        # -- location, alarm shapes, recurring completion ---------------------
+        print("location / alarms / recurring completion")
+        # EventKit drops EKReminder.location on save; it used to be accepted and lost.
+        res, data = s.tool("create_reminder", {"title": "loc probe", "list_name": TEST_LIST,
+                                               "location": "Office"}, expect_error=True)
+        check("plain location is rejected, not silently dropped",
+              "location alarm" in str(data), str(data)[:200])
+        res, data = s.tool("update_reminder", {"identifier": rid, "location": "Office"}, expect_error=True)
+        check("update rejects plain location too", "location alarm" in str(data), str(data)[:200])
+        _, la = s.tool("create_reminder", {
+            "title": "loc alarm probe", "list_name": TEST_LIST, "due": "2099-03-01T09:00",
+            "alarms": [{"location": {"title": "Smoke Office", "lat": 51.5, "lon": -0.12, "radius_m": 150},
+                        "proximity": "leave"},
+                       {"relative_minutes": -15}],
+        })
+        _, la_get = s.tool("get_reminder", {"identifier": la.get("identifier")})
+        loc_alarm = next((x for x in la_get.get("alarms", []) if x.get("type") == "location"), {})
+        check("location alarm persists with coordinates and proximity",
+              loc_alarm.get("proximity") == "leave" and
+              (loc_alarm.get("location") or {}).get("title") == "Smoke Office" and
+              abs((loc_alarm.get("location") or {}).get("lat", 0) - 51.5) < 1e-6, str(la_get.get("alarms")))
+        check("location reads back from the location alarm", la_get.get("location") == "Smoke Office",
+              str(la_get.get("location")))
+        check("relative_minutes alarm persists",
+              any(x.get("relative_minutes") == -15 for x in la_get.get("alarms", [])), str(la_get.get("alarms")))
+        _, ll_q = s.tool("list_reminders", {"list": TEST_LIST, "location_like": "smoke office"})
+        check("location_like matches a location alarm",
+              [x["identifier"] for x in ll_q.get("reminders", [])] == [la.get("identifier")], str(ll_q.get("count")))
+        s.tool("delete_reminder", {"identifier": la.get("identifier")})
+        res, data = s.tool("create_reminder", {"title": "no due probe", "list_name": TEST_LIST,
+                                               "alarms": [{"relative_minutes": -15}]}, expect_error=True)
+        check("relative alarm without a due date is rejected", "due date" in str(data), str(data)[:200])
+        res, data = s.tool("create_reminder", {"title": "bad alarm probe", "list_name": TEST_LIST, "due": TEST_DUE,
+                                               "alarms": [{"offset": -15}]}, expect_error=True)
+        check("unknown alarm field lists the accepted fields",
+              "Accepted fields: date, location, minutes, proximity, relative_minutes" in str(data), str(data)[:200])
+
+        _, rec = s.tool("create_reminder", {"title": "recurring probe", "list_name": TEST_LIST,
+                                            "due": "2030-01-07T09:00", "recurrence": {"frequency": "weekly"}})
+        _, rc = s.tool("complete_reminder", {"identifier": rec.get("identifier")})
+        check("recurring complete reports completed + recurring",
+              rc.get("completed") is True and rc.get("recurring") is True, str(rc)[:300])
+        # A "weekly" rule used to be stored as FREQ=MONTHLY (off-by-one frequency table).
+        check("recurring complete reports next_due a week on",
+              str(rc.get("next_due", "")).startswith("2030-01-14T09:00"), str(rc.get("next_due")))
+        occ = rc.get("completed_occurrence") or {}
+        check("recurring complete returns the completed occurrence",
+              occ.get("is_completed") is True and occ.get("identifier") != rec.get("identifier") and
+              str(occ.get("due_date", "")).startswith("2030-01-07T09:00"), str(occ)[:300])
+        for ident in (rec.get("identifier"), occ.get("identifier")):
+            if ident:
+                s.tool("delete_reminder", {"identifier": ident})
+        _, plain = s.tool("create_reminder", {"title": "plain complete probe", "list_name": TEST_LIST})
+        _, pc = s.tool("complete_reminder", {"identifier": plain.get("identifier")})
+        check("non-recurring complete reports recurring false",
+              pc.get("completed") is True and pc.get("recurring") is False and pc.get("is_completed") is True, str(pc)[:200])
+        s.tool("delete_reminder", {"identifier": plain.get("identifier")})
+
         # -- validation: bad inputs must be tool errors, not crashes ----------
         # Runs BEFORE the test list is deleted. It used to run after, so every check here
         # was satisfied by "list not found" rather than by the validation it names.

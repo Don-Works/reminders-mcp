@@ -11,16 +11,31 @@
 | `delete_list` | `list`, optional `move_to` (must be a different, writable list). Re-homing stages every move and the source-list removal, then commits the batch once |
 | `list_reminders` | `list`, `include_completed` (default false), `completed_only`, `due_from`, `due_until`, `query`, `notes_query`, `location_like`, `has_due_date`, `limit` (default 50, max 500). Returns `{count, total, truncated, reminders[]}` |
 | `get_reminder` | `identifier`, or `title` + optional `list_name`; ambiguous titles return up to 10 candidates |
-| `create_reminder` | `title` (required), `list_name`, `notes`, `url`, `location`, `priority` (`none\|high\|medium\|low` or 0/1/5/9), `due`, `start`, `alarms: [{minutes} \| {date}]`, `recurrence` |
+| `create_reminder` | `title` (required), `list_name`, `notes`, `url`, `priority` (`none\|high\|medium\|low` or 0/1/5/9), `due`, `start`, `alarms` (below), `recurrence`. A plain `location` is rejected: EventKit does not persist `EKReminder.location`, so a place is a location alarm |
 | `update_reminder` | lookup by `identifier` or `title`+`list_name`; same settable fields as create, plus `remove_due`, `remove_start`, `clear_alarm`, `clear_recurrence`, `move_to_list` |
-| `complete_reminder` | lookup + optional `completed_at` |
+| `complete_reminder` | lookup + optional `completed_at`. Adds `completed: true` and `recurring`. On a recurring reminder EventKit saves the done occurrence as a separate completed reminder and moves this identifier to the next occurrence, so the response carries `is_completed: false`, `next_due`, and `completed_occurrence` (the copy, or null if it could not be found). If EventKit completes the whole series instead (seen for occurrences far in the future), `is_completed` is true and `next_due` is null |
 | `uncomplete_reminder` | lookup |
 | `delete_reminder` | lookup |
 
+`alarms`: each item is exactly one of
+- `{relative_minutes: N}`: minutes from the due date, negative = before (`-15` = 15 minutes
+  before). `minutes` is an alias. Needs a due date; without one it is rejected, because it
+  would never fire.
+- `{date: ISO-8601}`: absolute.
+- `{location: {title, lat, lon, radius_m?}, proximity: "arrive"|"leave"}`: fires on arriving at
+  or leaving the place (`proximity` defaults to `arrive`; `radius_m` 0 < r ≤ 100000). The
+  reminder's `location` reads back as the first location alarm's title, and `location_like`
+  matches it.
+
+Read back, alarms are `{type: "relative", offset_seconds, relative_minutes}`,
+`{type: "absolute", date}`, or `{type: "location", location: {title, lat, lon, radius_m},
+proximity}`. EventKit does not keep alarm order. Unknown fields in an alarm, its location or
+a recurrence are rejected with the list of accepted fields.
+
 `recurrence`: `{frequency, interval (default 1), days_of_week[], days_of_month[],
 months_of_year[], weeks_of_year[], days_of_year[], set_positions[], until | count}`.
-`frequency` is daily/weekly/monthly/yearly/workdays/months/weeks — "days" is rejected
-(this SDK corrupts it, see `eventkit-surface.md`). All list fields are range-validated
+`frequency` is daily/weekly/monthly/yearly — the only values `EKRecurrenceFrequency` has.
+For workdays use weekly with `days_of_week: [2,3,4,5,6]`. All list fields are range-validated
 before reaching `EKRecurrenceRule`; `interval` and `count` are limited to
 `1...2147483647`. Relative alarm minutes are limited to ±52,560,000 (about a
 century). Out-of-range or wrong-typed input is a tool error, not a crash.
@@ -28,7 +43,7 @@ century). Out-of-range or wrong-typed input is a tool error, not a crash.
 Every supplied argument is type-checked at the tool boundary. In particular,
 wrong-typed update fields are rejected without changing the reminder; they are
 never interpreted as an empty value. Empty strings intentionally clear only
-`notes`, `url`, and `location`. Conflicting set/clear pairs such as `due` plus
+`notes` and `url`. Conflicting set/clear pairs such as `due` plus
 `remove_due` are rejected.
 
 Dates in: ISO-8601 (Z/offset, naive local, fractional seconds) or naive
