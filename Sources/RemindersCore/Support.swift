@@ -58,7 +58,7 @@ public func isJSONNumber(_ value: Any?) -> Bool {
 public func rejectUnknownKeys(_ object: [String: Any], allowed: Set<String>, name: String) throws {
     let unknown = object.keys.filter { !allowed.contains($0) }.sorted()
     guard unknown.isEmpty else {
-        throw MCPErr("\(name) contains unknown field(s): \(unknown.joined(separator: ", "))")
+        throw MCPErr("\(name) contains unknown field(s): \(unknown.joined(separator: ", ")). Accepted fields: \(allowed.sorted().joined(separator: ", "))")
     }
 }
 

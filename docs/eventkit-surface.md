@@ -71,8 +71,10 @@ initializer; `frequency`, `interval`, `recurrenceEnd`, `daysOfTheWeek`, `daysOfT
 `subscribed`, `immutable`, `color` (NSColor, settable), `source`.
 
 `EKWeekday`: 1 = Sunday … 7 = Saturday.
-`EKRecurrenceFrequency` raw values: daily 1, weekly 2, monthly 3, yearly 4, workdays 5,
-months 6, weeks 7, days 8 — **but see the recurrence gotchas below: 8 is a trap**.
+`EKRecurrenceFrequency` raw values: daily 0, weekly 1, monthly 2, yearly 3. Nothing else.
+An earlier version of this file listed daily 1 … weeks 7, days 8; that table was wrong and
+made "weekly" store FREQ=MONTHLY (corrected 2026-10-13 by printing the cases and the
+resulting RRULE).
 
 ## Implementation constraints found during the probe
 
@@ -107,10 +109,25 @@ months 6, weeks 7, days 8 — **but see the recurrence gotchas below: 8 is a tra
     Never trust these inits to reject out-of-range values — range-check the `Int`
     first. An invalid value that reaches `EKRecurrenceRule`'s init raises an
     uncatchable ObjC exception (the server process dies).
-  - `frequency` 8 ("days") looks constructible but `EKRecurrenceRule` silently stores
-    it as raw 0 — an invalid, unserializable rule. The server therefore rejects 8
-    (1–7 only), while still *labelling* raw 8 as "days" on the way out in case another
-    client created such a rule.
+  - Any raw frequency above 3 constructs without complaint and is stored as FREQ=DAILY.
+    The server takes frequency names only and maps them to the SDK's own cases.
   - `Date` is a `Double`: at the magnitude of year 2099 its resolution is ~119 ns, so
     an end-of-day boundary built with `nanosecond = 999_000_000` reads back as e.g.
     `999000072`. Harmless for range comparison; just don't assert equality on it.
+
+## Location, completion and the missing features (probed 2026-10-13)
+
+- `EKReminder.location` compiles and can be set, but it reads back nil after save and
+  refetch. Reminders keeps a place only as a structured-location alarm: `EKAlarm()` with
+  `structuredLocation` (`EKStructuredLocation(title:)`, `geoLocation`, `radius`) and
+  `proximity` (`.enter`/`.leave`). That alarm persists with its coordinates, radius and
+  proximity. The server rejects a plain `location` argument and reads `location` back from
+  the alarm.
+- Completing a recurring reminder: EventKit saves a completed copy of the occurrence (no
+  rule, new identifier) and moves the original identifier to the next occurrence, still
+  incomplete. For an occurrence in 2099 it instead marked the whole series completed.
+- Not in the public EventKit API: tags, flags, subtasks (sub-reminders), list sections.
+  Reminders.app's AppleScript dictionary exposes `flagged` (read/write) on a reminder, so
+  flags could be done the way `create_list` is done; it has nothing for tags, subtasks or
+  sections. Those would need private frameworks or the Reminders database, which this
+  server does not touch.

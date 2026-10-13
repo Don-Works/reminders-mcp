@@ -4,46 +4,54 @@
 
 import Foundation
 import EventKit
+import CoreLocation
 
 // MARK: - Serialization
 
 func alarmJSON(_ a: EKAlarm) -> [String: Any] {
     var o: [String: Any] = [:]
-    if let d = a.absoluteDate {
+    if let sl = a.structuredLocation {
+        o["type"] = "location"
+        var loc: [String: Any] = ["title": sl.title ?? NSNull()]
+        if let c = sl.geoLocation?.coordinate {
+            loc["lat"] = c.latitude
+            loc["lon"] = c.longitude
+        }
+        if sl.radius > 0 { loc["radius_m"] = sl.radius }
+        o["location"] = loc
+        o["proximity"] = proximityNames[a.proximity] ?? "none"
+    } else if let d = a.absoluteDate {
         o["type"] = "absolute"
         o["date"] = iso8601(d)
-    } else if a.relativeOffset != 0 {
-        o["type"] = "relative"
-        o["offset_seconds"] = a.relativeOffset
-    } else if let e = a.emailAddress {
+    } else if a.relativeOffset == 0, let e = a.emailAddress {
         o["type"] = "email"
         o["email"] = e
-    } else if let s = a.soundName {
+    } else if a.relativeOffset == 0, let s = a.soundName {
         o["type"] = "sound"
         o["sound"] = s
     } else {
-        o["type"] = "unknown"
+        // An offset of 0 is a real alarm ("at the due time"), not an unknown one.
+        o["type"] = "relative"
+        o["offset_seconds"] = a.relativeOffset
+        o["relative_minutes"] = Int((a.relativeOffset / 60).rounded())
     }
     return o
 }
 
-/// Raw values verified on this SDK: daily 1, weekly 2, monthly 3, yearly 4,
-/// workdays 5, months 6, weeks 7. 8 ("days") exists in the ObjC enum but
-/// EKRecurrenceRule silently stores it as raw 0 (an invalid rule) — probed
-/// 2026-09-08 — so it is rejected on the way in but still labelled on the way
-/// out, in case another client manages to create such a rule.
-let frequencyRawToName: [Int: String] = [
-    1: "daily", 2: "weekly", 3: "monthly", 4: "yearly",
-    5: "workdays", 6: "months", 7: "weeks", 8: "days",
-]
-let frequencyNameToRaw: [String: Int] = [
-    "daily": 1, "weekly": 2, "monthly": 3, "yearly": 4,
-    "workdays": 5, "months": 6, "weeks": 7,
+let proximityNames: [EKAlarmProximity: String] = [.enter: "arrive", .leave: "leave", .none: "none"]
+
+/// Uses the SDK's own cases. The table used to hard-code daily 1, weekly 2,
+/// monthly 3, yearly 4, workdays 5, months 6, weeks 7, which is off by one
+/// (EventKit: daily 0, weekly 1, monthly 2, yearly 3; anything above 3 stores
+/// as DAILY). A "weekly" request was saved as FREQ=MONTHLY and read back as
+/// "weekly" through the same table. Probed 2026-10-13.
+let frequencyByName: [String: EKRecurrenceFrequency] = [
+    "daily": .daily, "weekly": .weekly, "monthly": .monthly, "yearly": .yearly,
 ]
 
 func recurrenceJSON(_ r: EKRecurrenceRule) -> [String: Any] {
     var o: [String: Any] = [
-        "frequency": frequencyRawToName[r.frequency.rawValue] ?? "other",
+        "frequency": frequencyByName.first { $0.value == r.frequency }?.key ?? "other",
         "interval": r.interval,
     ]
     if let d = r.daysOfTheWeek, !d.isEmpty { o["days_of_week"] = d.map { $0.dayOfTheWeek.rawValue } }
@@ -67,27 +75,70 @@ func recurrenceJSON(_ r: EKRecurrenceRule) -> [String: Any] {
 public let alarmMinutesLimit = 100 * 365 * 24 * 60
 public let recurrenceIntegerLimit = Int(Int32.max)
 
+public let alarmFields: Set<String> = ["relative_minutes", "minutes", "date", "location", "proximity"]
+public let alarmLocationFields: Set<String> = ["title", "lat", "lon", "radius_m"]
+public let alarmRadiusLimit = 100_000.0
+public let alarmShapeHelp = "Each alarm must be exactly one of {relative_minutes: N} (minutes from the due date, negative = before; `minutes` is an alias), {date: ISO-8601}, or {location: {title, lat, lon, radius_m?}, proximity: \"arrive\"|\"leave\" (default arrive)}"
+
 public func alarmFrom(_ a: [String: Any]) throws -> EKAlarm {
-    try rejectUnknownKeys(a, allowed: ["minutes", "date"], name: "alarm")
-    let hasMinutes = a.keys.contains("minutes")
-    let hasDate = a.keys.contains("date")
-    guard hasMinutes != hasDate else {
-        throw MCPErr("Each alarm must contain exactly one of minutes or date")
+    try rejectUnknownKeys(a, allowed: alarmFields, name: "alarm")
+    let kinds = ["relative_minutes", "minutes", "date", "location"].filter { a.keys.contains($0) }
+    guard kinds.count == 1, let kind = kinds.first else { throw MCPErr(alarmShapeHelp) }
+    if a.keys.contains("proximity") && kind != "location" {
+        throw MCPErr("alarm.proximity applies only to a location alarm. \(alarmShapeHelp)")
     }
-    if hasMinutes {
-        guard let m = try optionalIntegerArg(a["minutes"], name: "alarm.minutes") else {
-            throw MCPErr("alarm.minutes is required")
+    switch kind {
+    case "relative_minutes", "minutes":
+        guard let m = try optionalIntegerArg(a[kind], name: "alarm.\(kind)") else {
+            throw MCPErr("alarm.\(kind) must be an integer")
         }
         guard (-alarmMinutesLimit...alarmMinutesLimit).contains(m) else {
-            throw MCPErr("alarm.minutes must be within ±\(alarmMinutesLimit) (about a century)")
+            throw MCPErr("alarm.\(kind) must be within ±\(alarmMinutesLimit) (about a century)")
         }
         return EKAlarm(relativeOffset: TimeInterval(m * 60))
-    }
-    if let d = try optionalStringArg(a["date"], name: "alarm.date") {
+    case "date":
+        let d = try requiredStringArg(a["date"], name: "alarm.date")
         guard let dt = parseDue(d)?.date else { throw MCPErr("Bad alarm date \"\(d)\"") }
         return EKAlarm(absoluteDate: dt)
+    default:
+        return try locationAlarmFrom(a)
     }
-    throw MCPErr("Each alarm must be {minutes: N} or {date: ISO-8601}")
+}
+
+private func locationAlarmFrom(_ a: [String: Any]) throws -> EKAlarm {
+    guard let loc = try optionalObjectArg(a["location"], name: "alarm.location") else {
+        throw MCPErr("alarm.location must be an object")
+    }
+    try rejectUnknownKeys(loc, allowed: alarmLocationFields, name: "alarm.location")
+    let title = try requiredStringArg(loc["title"], name: "alarm.location.title")
+    let lat = try coordinate(loc["lat"], name: "alarm.location.lat", limit: 90)
+    let lon = try coordinate(loc["lon"], name: "alarm.location.lon", limit: 180)
+    let proximity: EKAlarmProximity
+    switch try optionalStringArg(a["proximity"], name: "alarm.proximity")?.lowercased() {
+    case nil, "arrive": proximity = .enter
+    case "leave": proximity = .leave
+    case let other?: throw MCPErr("alarm.proximity must be \"arrive\" or \"leave\", not \"\(other)\"")
+    }
+    let sl = EKStructuredLocation(title: title)
+    sl.geoLocation = CLLocation(latitude: lat, longitude: lon)
+    if loc["radius_m"] != nil {
+        guard isJSONNumber(loc["radius_m"]), let r = (loc["radius_m"] as? NSNumber)?.doubleValue,
+              r.isFinite, r > 0, r <= alarmRadiusLimit else {
+            throw MCPErr("alarm.location.radius_m must be a number above 0 and at most \(Int(alarmRadiusLimit))")
+        }
+        sl.radius = r
+    }
+    let alarm = EKAlarm()
+    alarm.structuredLocation = sl
+    alarm.proximity = proximity
+    return alarm
+}
+
+private func coordinate(_ value: Any?, name: String, limit: Double) throws -> Double {
+    guard isJSONNumber(value), let d = (value as? NSNumber)?.doubleValue, d.isFinite, abs(d) <= limit else {
+        throw MCPErr("\(name) must be a number between -\(Int(limit)) and \(Int(limit))")
+    }
+    return d
 }
 
 /// Build an EKRecurrenceRule with every numeric field range-checked. Unchecked
@@ -110,8 +161,8 @@ public func recurrenceFrom(_ a: [String: Any]) throws -> EKRecurrenceRule {
     // reaches EKRecurrenceRule's init raises an uncatchable ObjC exception,
     // which kills the whole server process instead of failing one call.
     let frequencyName = try requiredStringArg(a["frequency"], name: "recurrence.frequency").lowercased()
-    guard let freqRaw = frequencyNameToRaw[frequencyName] else {
-        throw MCPErr("recurrence.frequency must be daily/weekly/monthly/yearly/workdays/months/weeks")
+    guard let freq = frequencyByName[frequencyName] else {
+        throw MCPErr("recurrence.frequency must be daily/weekly/monthly/yearly (for workdays use weekly with days_of_week [2,3,4,5,6])")
     }
     let interval = try optionalIntegerArg(a["interval"], name: "recurrence.interval") ?? 1
     guard (1...recurrenceIntegerLimit).contains(interval) else {
@@ -162,11 +213,6 @@ public func recurrenceFrom(_ a: [String: Any]) throws -> EKRecurrenceRule {
         sp = []
     }
 
-    guard let freq = EKRecurrenceFrequency(rawValue: freqRaw) else {
-        throw MCPErr("Bad recurrence frequency")
-    }
-    // Sanity: freqRaw is 1-7 so this is always non-nil-and-valid; keep the check
-    // as a tripwire against a future SDK that makes the init actually failable.
     return EKRecurrenceRule(
         recurrenceWith: freq,
         interval: interval,
