@@ -36,9 +36,9 @@ unlocked so the prompts can be answered.
 
 macOS grants privacy access to the *responsible app*, not just to this helper's
 binary. Running the helper directly can therefore grant access to Terminal (or
-another terminal app) without granting it to a daemon-hosted gateway. For Maix,
-make one Reminders tool call through Maix and approve **Maix** when prompted. If
-the prompt was missed, enable Maix under System Settings → Privacy & Security →
+another terminal app) without granting it to a daemon-hosted gateway. For mx,
+make one Reminders tool call through mx and approve **mx** (an older install may be listed as **maix**) when prompted. If
+the prompt was missed, enable mx under System Settings → Privacy & Security →
 Reminders and retry. A timed-out first call now reports this distinction instead
 of implying that the Reminders store is wedged.
 
