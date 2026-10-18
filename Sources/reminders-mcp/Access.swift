@@ -66,7 +66,7 @@ func ensureAccess() throws {
     }
     if sem.wait(timeout: .now() + accessPromptTimeout) == .timedOut {
         let current = authorizationStatusName(EKEventStore.authorizationStatus(for: .reminder))
-        throw MCPErr("macOS is still waiting for a Reminders permission choice (status: \(current)). Keep the login session unlocked and approve the prompt for the responsible app—for a Maix gateway, approve Maix, not only your terminal. If no prompt is visible, enable Maix in System Settings → Privacy & Security → Reminders, then retry.")
+        throw MCPErr("macOS is still waiting for a Reminders permission choice (status: \(current)). Keep the login session unlocked and approve the prompt for the responsible app—for an mx gateway, approve mx, not only your terminal. If no prompt is visible, enable mx in System Settings → Privacy & Security → Reminders, then retry.")
     }
     if granted {
         access = .granted
